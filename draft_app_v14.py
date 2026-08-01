@@ -537,21 +537,18 @@ assign_team = st.selectbox(
     st.session_state.team_names, key="assign_team"
 )
 
-available = board[~board["name"].isin(st.session_state.drafted.keys())].copy()
-if pos_filter != "ALL":
-    available = available[available["pos"] == pos_filter]
-if search:
-    available = available[available["name"].str.contains(search, case=False, na=False)]
+available_all = board[~board["name"].isin(st.session_state.drafted.keys())].copy()
 
 # Steal detection: how many picks past this player's ADP-expected slot are we,
 # given the CURRENT overall pick number? Only meaningful for players with a
 # known ADP; players with no ADP data are left out of steal detection entirely
-# rather than guessed at.
-available["steal_gap"] = available["adp_rank"].apply(
+# rather than guessed at. Computed on the FULL pool so it's never hidden by
+# an active position filter or search.
+available_all["steal_gap"] = available_all["adp_rank"].apply(
     lambda adp: (st.session_state.pick_number - adp) if pd.notna(adp) else None
 )
 
-steals = available[available["steal_gap"].fillna(0) >= steal_threshold].copy()
+steals = available_all[available_all["steal_gap"].fillna(0) >= steal_threshold].copy()
 steals = steals.sort_values("steal_gap", ascending=False)
 
 if len(steals) > 0:
@@ -568,7 +565,7 @@ if len(steals) > 0:
     st.markdown("---")
 
 adj_values, reasons = [], []
-for _, row in available.iterrows():
+for _, row in available_all.iterrows():
     need_mult, need_reason = need_multiplier(view_team, row["pos"], bench_allowance, decay_rate)
     bye_mult, bye_reason = bye_collision_multiplier(view_team, row["pos"], row["bye"])
     total_mult = need_mult * bye_mult
@@ -580,17 +577,31 @@ for _, row in available.iterrows():
         parts.append(f"🔥 {int(row['steal_gap'])} picks past ADP ({int(row['adp_rank'])})")
     reasons.append("; ".join(parts))
 
-available["adjusted_value"] = adj_values
-available["reason"] = reasons
+available_all["adjusted_value"] = adj_values
+available_all["reason"] = reasons
+
+best_available_all = available_all.sort_values("vbd_value", ascending=False)
+recommended_all = available_all.sort_values("adjusted_value", ascending=False)
+
+# Top-3 sets and the TRUE top pick are always computed off the full pool --
+# never off whatever a position filter or search happens to narrow the view
+# to. This is what fixes the bug where searching made an unrelated player
+# falsely appear as "TOP PICK": that label now only ever attaches to the
+# actual best pick, whether or not it's currently visible in a filtered view.
+top3_vbd_names = set(best_available_all.head(3)["name"])
+top3_rec_names = set(recommended_all.head(3)["name"])
+true_top_pick_name = recommended_all.iloc[0]["name"] if len(recommended_all) else None
+
+# NOW apply position/search filters -- for DISPLAY only, using the columns
+# already computed above rather than recomputing anything.
+available = available_all.copy()
+if pos_filter != "ALL":
+    available = available[available["pos"] == pos_filter]
+if search:
+    available = available[available["name"].str.contains(search, case=False, na=False)]
 
 best_available = available.sort_values("vbd_value", ascending=False)
 recommended = available.sort_values("adjusted_value", ascending=False)
-
-# Top-3 sets computed off the FULL available pool (not the filtered/searched
-# subset), so the highlight always reflects the true best-overall / best-for-team
-# even if a position filter or search narrows what's currently shown.
-top3_vbd_names = set(best_available.head(3)["name"])
-top3_rec_names = set(recommended.head(3)["name"])
 
 
 def draft_button(row, key_prefix):
@@ -641,7 +652,7 @@ recommended_list = list(recommended.head(30).iterrows())
 for i, (_, row) in enumerate(recommended_list):
     is_yellow = row["name"] in top3_vbd_names
     is_green = row["name"] in top3_rec_names
-    is_top_pick = (i == 0)
+    is_top_pick = (row["name"] == true_top_pick_name)
 
     if is_top_pick:
         bg = "background-color:#fff3b0;border:3px solid #b8860b;border-radius:6px;color:#1a1a2e;"
