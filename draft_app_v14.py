@@ -50,6 +50,7 @@ import streamlit as st
 import pandas as pd
 import random
 import os
+import math
 
 try:
     import anthropic
@@ -682,6 +683,17 @@ recommended_all = available_all.sort_values("adjusted_value", ascending=False).r
 # "we have him ranked well ahead of his typical ADP" points straight back to
 # whatever drove that (scarcity bonus, need, etc.), so it's not just a
 # floating number with no explanation.
+#
+# Important: published ADP is almost always sourced from standard 10-12 team
+# industry drafts, NOT necessarily this league's actual team count. Our own
+# ranking already correctly accounts for st.session_state.num_teams (it's
+# baked into the VBD baseline calculation). Comparing raw rank numbers
+# directly would silently compare two different scales -- so instead we
+# convert both into ROUNDS, each using its own team-count context, and
+# compare THAT. This is what correctly answers "does my league size mean
+# I might land him later than his ADP suggests" instead of just assuming yes.
+ASSUMED_ADP_LEAGUE_SIZE = 12  # standard industry default; Footballguys doesn't publish their own assumed size
+
 rank_lookup = {name: i + 1 for i, name in enumerate(recommended_all["name"])}
 final_reasons = []
 for i, row in enumerate(available_all.itertuples()):
@@ -691,23 +703,29 @@ for i, row in enumerate(available_all.itertuples()):
     adp_note = ""
     if pd.notna(adp_rank) and our_rank is not None:
         adp_rank_int = int(adp_rank)
-        diff = adp_rank_int - our_rank  # positive = we have him ranked earlier than his ADP
-        if diff >= 8:
+        adp_round = math.ceil(adp_rank_int / ASSUMED_ADP_LEAGUE_SIZE)
+        our_round = math.ceil(our_rank / st.session_state.num_teams)
+        round_diff = adp_round - our_round  # positive = we think he goes EARLIER (lower round) than ADP implies
+
+        if round_diff >= 1:
             adp_note = (
-                f" We have him ranked well ahead of his typical draft position (ADP {adp_rank_int}) "
-                f"— that's the scarcity/need factors above pulling him up."
+                f" Industry ADP has him going around round {adp_round} (ADP {adp_rank_int}, based on "
+                f"a standard ~{ASSUMED_ADP_LEAGUE_SIZE}-team format) — but in your {st.session_state.num_teams}-team "
+                f"league, we rate him as the #{our_rank} player left, which lines up closer to round "
+                f"{our_round}. A smaller league doesn't automatically mean he lasts longer — don't "
+                f"count on him falling to round {adp_round}."
             )
-        elif diff >= 3:
-            adp_note = f" That's a bit ahead of his typical ADP ({adp_rank_int})."
-        elif diff <= -8:
+        elif round_diff <= -1:
             adp_note = (
-                f" That's notably behind his typical ADP ({adp_rank_int}) — his fit for your "
-                f"team specifically doesn't stand out as much as his general market value."
+                f" Industry ADP puts him around round {adp_round} (ADP {adp_rank_int}, ~{ASSUMED_ADP_LEAGUE_SIZE}-team "
+                f"standard) — in your {st.session_state.num_teams}-team league, our model has him more "
+                f"like round {our_round}, so there's a real chance he's still there later than the ADP number implies."
             )
-        elif diff <= -3:
-            adp_note = f" That's a bit behind his typical ADP ({adp_rank_int})."
         else:
-            adp_note = f" That's right in line with his typical ADP ({adp_rank_int})."
+            adp_note = (
+                f" That lines up with his typical ADP ({adp_rank_int}, about round {adp_round} in a "
+                f"standard format)."
+            )
     final_reasons.append(base_reason + adp_note)
 
 available_all["reason"] = final_reasons
