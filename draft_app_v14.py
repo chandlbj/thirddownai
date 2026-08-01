@@ -19,10 +19,16 @@ v14 adds on top of v13:
 - Added requirements.txt (streamlit, pandas, streamlit-keyup, anthropic),
   required for Streamlit Cloud to install dependencies on deploy.
 - Third Down AI branding: uses the REAL banner/icon image assets (assets/banner.png,
-  assets/icon.png -- must be committed to the repo alongside this file) and the
-  actual brand tagline "We show our work. We keep score." instead of invented
-  copy. Filename kept as draft_app_v14.py so the already-deployed Streamlit app
-  picks up the change on redeploy without needing its settings updated.
+  assets/banner_cropped.png, assets/icon.png -- must be committed to the repo
+  alongside this file) and the actual brand tagline "We show our work. We keep
+  score." instead of invented copy. Filename kept as draft_app_v14.py so the
+  already-deployed Streamlit app picks up the change on redeploy without
+  needing its settings updated.
+- UI cleanup: "Value model tuning" is now a collapsible sidebar expander,
+  consistent with the other config sections. The "AI Reasoning Layer" sidebar
+  section is now fully hidden once a key is resolved from Streamlit secrets
+  or the environment (the normal deployed/tester experience) -- it only
+  appears at all when someone genuinely needs to type a key in manually.
 
 v13 recap: AI Reasoning Layer ("Why this pick?" + ask-about-any-player).
 v12 recap: absolute (not curved) draft grading.
@@ -329,14 +335,14 @@ st.session_state.my_team = st.sidebar.selectbox(
 )
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("Value model tuning")
-bench_allowance = st.sidebar.slider("Bench allowance per position (value model)", 0, 4, 2,
-                                     help="How many picks beyond starters/flex still get solid value before steep decay. Separate from the roster bench-spot count above.")
-decay_rate = st.sidebar.slider("Excess-depth decay rate", 0.2, 0.8, 0.55, 0.05)
-steal_threshold = st.sidebar.slider(
-    "Steal alert threshold (picks past ADP)", 5, 30, 15,
-    help="Flag a player as a live steal once they've fallen this many picks past their expected (ADP) draft position."
-)
+with st.sidebar.expander("Value model tuning"):
+    bench_allowance = st.slider("Bench allowance per position (value model)", 0, 4, 2,
+                                 help="How many picks beyond starters/flex still get solid value before steep decay. Separate from the roster bench-spot count above.")
+    decay_rate = st.slider("Excess-depth decay rate", 0.2, 0.8, 0.55, 0.05)
+    steal_threshold = st.slider(
+        "Steal alert threshold (picks past ADP)", 5, 30, 15,
+        help="Flag a player as a live steal once they've fallen this many picks past their expected (ADP) draft position."
+    )
 
 
 def auto_complete_draft(stop_before_team=None):
@@ -382,36 +388,30 @@ if auto_col2.button("⏩ All"):
     auto_complete_draft(stop_before_team=None)
     st.rerun()
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("AI Reasoning Layer")
-if not HAVE_ANTHROPIC:
-    st.sidebar.caption("Install the `anthropic` package to enable AI pick explanations: `pip install anthropic`")
-else:
-    # Check three places, in order: Streamlit Cloud secrets (for the hosted
-    # version), then OS environment variable (for local use), then fall back
-    # to a manual sidebar input. This means the exact same file works
-    # unchanged whether it's run locally or deployed to Streamlit Community
-    # Cloud -- only WHERE the key lives changes, not the code.
-    secrets_key = ""
-    try:
-        secrets_key = st.secrets.get("ANTHROPIC_API_KEY", "")
-    except Exception:
-        pass  # no secrets.toml / no Streamlit Cloud secrets configured -- fine locally
+# Resolve the API key silently in the background. Only show sidebar UI for
+# this at all when a manual key entry is genuinely needed (local use with no
+# secrets/env configured) -- testers on the deployed app never see this,
+# since Streamlit Cloud secrets resolve it before any UI would render.
+secrets_key = ""
+try:
+    secrets_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+except Exception:
+    pass  # no secrets.toml / no Streamlit Cloud secrets configured -- fine locally
 
-    env_key = os.environ.get("ANTHROPIC_API_KEY", "")
+env_key = os.environ.get("ANTHROPIC_API_KEY", "")
 
-    if secrets_key:
-        st.session_state["anthropic_api_key"] = secrets_key
-        st.sidebar.caption("Using API key from Streamlit Cloud secrets.")
-    elif env_key:
-        st.session_state["anthropic_api_key"] = env_key
-        st.sidebar.caption("Using ANTHROPIC_API_KEY from environment.")
-    else:
-        key_input = st.sidebar.text_input(
-            "Anthropic API key (session only, never saved to disk)",
-            type="password", value=st.session_state.get("anthropic_api_key", "")
-        )
-        st.session_state["anthropic_api_key"] = key_input
+if secrets_key:
+    st.session_state["anthropic_api_key"] = secrets_key
+elif env_key:
+    st.session_state["anthropic_api_key"] = env_key
+elif HAVE_ANTHROPIC:
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("AI Reasoning Layer")
+    key_input = st.sidebar.text_input(
+        "Anthropic API key (session only, never saved to disk)",
+        type="password", value=st.session_state.get("anthropic_api_key", "")
+    )
+    st.session_state["anthropic_api_key"] = key_input
     st.sidebar.caption(
         "Uses your own Anthropic account -- each explanation is a real, small API call "
         "against your usage. Nothing is sent unless you click an explain button."
