@@ -692,7 +692,9 @@ recommended_all = available_all.sort_values("adjusted_value", ascending=False).r
 # convert both into ROUNDS, each using its own team-count context, and
 # compare THAT. This is what correctly answers "does my league size mean
 # I might land him later than his ADP suggests" instead of just assuming yes.
-ASSUMED_ADP_LEAGUE_SIZE = 12  # standard industry default; Footballguys doesn't publish their own assumed size
+# (our own round is still computed via league-size-aware projection above;
+# the ADP side of the comparison below is kept as a simple pick-number
+# reference rather than converting it into rounds)
 
 rank_lookup = {name: i + 1 for i, name in enumerate(recommended_all["name"])}
 current_round = math.ceil(st.session_state.pick_number / st.session_state.num_teams)
@@ -723,23 +725,21 @@ for i, row in enumerate(available_all.itertuples()):
                 f"round{'s' if rounds_of_room != 1 else ''} — you could reasonably wait on him if you want."
             )
 
-        # ADP context: purely informational (why our number differs from
-        # public consensus), NOT a signal about whether to wait.
+        # ADP context: purely informational, simple pick-vs-pick comparison --
+        # the round/team-size math is useful internally but just adds noise
+        # to the sentence itself.
         if pd.notna(adp_rank):
             adp_rank_int = int(adp_rank)
-            adp_round = math.ceil(adp_rank_int / ASSUMED_ADP_LEAGUE_SIZE)
-            if adp_round < our_round:
+            current_pick = st.session_state.pick_number
+            if adp_rank_int < current_pick:
+                note += f" For reference, his typical ADP is pick {adp_rank_int} — you're already past that."
+            elif adp_rank_int > current_pick:
                 note += (
-                    f" For reference, industry ADP (ADP {adp_rank_int}, ~{ASSUMED_ADP_LEAGUE_SIZE}-team "
-                    f"standard) usually takes him earlier, around round {adp_round}."
-                )
-            elif adp_round > our_round:
-                note += (
-                    f" For reference, that's actually earlier than his industry ADP (round {adp_round}) "
-                    f"— the scarcity/need factors above are pulling him up for your team."
+                    f" For reference, his typical ADP is pick {adp_rank_int} "
+                    f"({adp_rank_int - current_pick} picks from now)."
                 )
             else:
-                note += f" That lines up with his typical ADP (round {adp_round})."
+                note += f" For reference, his typical ADP is pick {adp_rank_int} — right about now."
     final_reasons.append(base_reason + note)
 
 available_all["reason"] = final_reasons
