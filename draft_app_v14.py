@@ -618,16 +618,16 @@ for i, (_, row) in enumerate(recommended_list):
     is_top_pick = (i == 0)
 
     if is_top_pick:
-        bg = "background-color:#fff3b0;border:3px solid #b8860b;border-radius:6px;"
+        bg = "background-color:#fff3b0;border:3px solid #b8860b;border-radius:6px;color:#1a1a2e;"
         label = "🏆 TOP PICK — "
     elif is_yellow and is_green:
-        bg = "background-color:#fff3b0;border-left:6px solid #2e7d32;"
+        bg = "background-color:#fff3b0;border-left:6px solid #2e7d32;color:#1a1a2e;"
         label = ""
     elif is_green:
-        bg = "background-color:#d9f2d9;"
+        bg = "background-color:#d9f2d9;color:#1a1a2e;"
         label = ""
     elif is_yellow:
-        bg = "background-color:#fff3b0;"
+        bg = "background-color:#fff3b0;color:#1a1a2e;"
         label = ""
     else:
         bg = ""
