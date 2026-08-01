@@ -115,6 +115,13 @@ defaults = {
     "req_te": 1,
     "req_flex": 1,
     "req_bench": 8,
+    # Personal caps: hard ceiling on total drafted at a position, separate
+    # from bench-depth penalties. Defaults generous enough not to change
+    # anyone's behavior unless they tighten them.
+    "max_qb": 3,
+    "max_rb": 6,
+    "max_wr": 7,
+    "max_te": 3,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -297,6 +304,14 @@ def need_multiplier(team_name, pos, bench_allowance, decay_rate):
     if count < req:
         return 1.0, f"You still need a starting {pos_label} ({count}/{req} filled) — this fills that spot.", 0.0
 
+    max_cap = {"QB": st.session_state.max_qb, "RB": st.session_state.max_rb,
+               "WR": st.session_state.max_wr, "TE": st.session_state.max_te}.get(pos, 99)
+    if count >= max_cap:
+        return 1.0, (
+            f"You've hit your personal cap of {max_cap} {pos_label}s — this won't be recommended "
+            f"even though he's available."
+        ), -1000.0
+
     if pos in FLEX_ELIGIBLE and st.session_state.flex_filled.get(team_name) is None:
         # FLEX is a "best of what's left" slot, not a specific structural need
         # the way an unfilled required starter is. A multiplicative discount
@@ -429,6 +444,16 @@ with st.sidebar.expander("Roster requirements"):
     total_rounds = (st.session_state.req_qb + st.session_state.req_rb + st.session_state.req_wr +
                     st.session_state.req_te + st.session_state.req_flex + st.session_state.req_bench)
     st.caption(f"Rounds implied by roster size: **{total_rounds}** (starters + flex + bench, excludes IR)")
+
+    st.markdown("---")
+    st.caption(
+        "Personal caps — a hard ceiling per position, regardless of bench depth. "
+        "E.g. set TE to 2 if you never want a 3rd, no matter how good the value looks."
+    )
+    st.session_state.max_qb = st.number_input("Max QBs to draft", min_value=1, max_value=10, value=st.session_state.max_qb)
+    st.session_state.max_rb = st.number_input("Max RBs to draft", min_value=1, max_value=15, value=st.session_state.max_rb)
+    st.session_state.max_wr = st.number_input("Max WRs to draft", min_value=1, max_value=15, value=st.session_state.max_wr)
+    st.session_state.max_te = st.number_input("Max TEs to draft", min_value=1, max_value=10, value=st.session_state.max_te)
 
 st.sidebar.markdown("---")
 with st.sidebar.expander("Value model tuning"):
