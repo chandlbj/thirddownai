@@ -120,6 +120,7 @@ for k, v in defaults.items():
         st.session_state[k] = v
 
 FLEX_ELIGIBLE = {"RB", "WR", "TE"}
+POSITION_LABELS = {"QB": "quarterback", "RB": "running back", "WR": "wide receiver", "TE": "tight end"}
 
 
 # ---- Point / VBD computation (recomputed live from current settings) ----
@@ -241,12 +242,13 @@ def need_multiplier(team_name, pos, bench_allowance, decay_rate):
     counts = roster_counts(team_name)
     count = counts[pos]
     req = REQUIRED_STARTERS.get(pos, 0)
+    pos_label = POSITION_LABELS.get(pos, pos)
 
     if count < req:
-        return 1.0, f"fills starting {pos} slot ({count+1}/{req})"
+        return 1.0, f"You still need a starting {pos_label} ({count}/{req} filled) — this fills that spot."
 
     if pos in FLEX_ELIGIBLE and st.session_state.flex_filled.get(team_name) is None:
-        return 1.0, "fills FLEX slot"
+        return 1.0, f"This would fill your open FLEX spot."
 
     already_bench = count - req
     if pos in FLEX_ELIGIBLE and st.session_state.flex_filled.get(team_name) == pos:
@@ -256,13 +258,14 @@ def need_multiplier(team_name, pos, bench_allowance, decay_rate):
     if already_bench < bench_allowance:
         mult = 0.85 * (0.9 ** already_bench)
         return round(mult, 3), (
-            f"bench depth at {pos} ({already_bench+1} beyond starters/flex, "
-            f"within {bench_allowance}-slot allowance)"
+            f"Your starters at {pos_label} are set, but this is still useful bench depth."
         )
     else:
         excess = already_bench - bench_allowance + 1
         mult = 0.85 * (0.9 ** bench_allowance) * (decay_rate ** excess)
-        return round(mult, 3), f"excess depth at {pos} — steeply discounted"
+        return round(mult, 3), (
+            f"You already have plenty of {pos_label}s — this one won't likely see the field."
+        )
 
 
 def bye_collision_multiplier(team_name, pos, bye):
@@ -275,7 +278,10 @@ def bye_collision_multiplier(team_name, pos, bye):
         return 1.0, None
     names = ", ".join(p["name"] for p in same)
     mult = 0.9 ** len(same)
-    return round(mult, 3), f"shares Week {bye_int} bye with {team_name}'s {pos}: {names}"
+    return round(mult, 3), (
+        f"Heads up — he's on a Week {bye_int} bye, same as your {POSITION_LABELS.get(pos, pos)} "
+        f"{names}, so you'd be short a starter that week."
+    )
 
 
 # ============ SIDEBAR: League Configuration ============
@@ -369,6 +375,26 @@ with st.sidebar.expander("Value model tuning"):
         "Steal alert threshold (picks past ADP)", 5, 30, 15,
         help="Flag a player as a live steal once they've fallen this many picks past their expected (ADP) draft position."
     )
+
+    st.markdown("---")
+    scarcity_toggle = st.checkbox(
+        "Factor positional scarcity into rankings (recommended)", value=True,
+        help=(
+            "ON: when the best remaining player at a position has a big point gap over the "
+            "next-best option there, that gap adds real value to their ranking — reflecting "
+            "the cost of waiting and likely missing that whole tier. This is why an elite TE "
+            "or a top RB can rank above a slightly-higher-raw-value player at a deeper position. "
+            "OFF: rankings are pure value (VBD) only, with no scarcity adjustment -- the scarcity "
+            "insight still appears in the explanation text either way, but it won't move anyone's "
+            "rank when this is off."
+        )
+    )
+    scarcity_weight = 0.5
+    if scarcity_toggle:
+        scarcity_weight = st.slider(
+            "Scarcity adjustment strength", 0.0, 1.0, 0.5, 0.1,
+            help="How much of the positional point-gap gets added as bonus value. 0 = no effect (same as OFF). 1 = the full gap counts."
+        )
 
 
 def auto_complete_draft(stop_before_team=None):
@@ -578,24 +604,48 @@ for pos in REQUIRED_STARTERS:
     )
 
 
-def scarcity_note(row):
+def gap_tier_phrase(gap):
+    if gap >= 20:
+        return "a huge edge — this position falls off a cliff after him"
+    elif gap >= 10:
+        return "a real, meaningful edge"
+    elif gap >= 5:
+        return "a modest edge"
+    else:
+        return "barely ahead of the next option, so this position should stay deep for a while"
+
+
+def scarcity_info(row):
+    """Returns (explanation_text, scarcity_gap). scarcity_gap is only
+    non-zero for the current best-remaining player at their position --
+    that's the one actually facing a "grab now or miss this tier" decision."""
     pos_df = pos_groups.get(row["pos"])
+    pos_label = POSITION_LABELS.get(row["pos"], row["pos"])
     if pos_df is None or len(pos_df) == 0:
-        return ""
+        return "", 0.0
     matches = pos_df.index[pos_df["name"] == row["name"]]
     if len(matches) == 0:
-        return ""
+        return "", 0.0
     rank = matches[0]  # 0-based: 0 = best remaining at this position
     if rank == 0:
         if len(pos_df) > 1:
             gap = row["vbd_value"] - pos_df.iloc[1]["vbd_value"]
             next_name = pos_df.iloc[1]["name"]
-            return f"top {row['pos']} left, {gap:.1f} pts clear of next-best {next_name} — a real gap"
-        return f"only {row['pos']} left with real value"
+            tier = gap_tier_phrase(gap)
+            text = (
+                f"He's the best {pos_label} left on the board, {gap:.0f} points ahead of the "
+                f"next-best one ({next_name}) — {tier}."
+            )
+            return text, gap
+        return f"He's the only {pos_label} left with real value.", 0.0
     else:
         top_row = pos_df.iloc[0]
         gap_to_top = top_row["vbd_value"] - row["vbd_value"]
-        return f"{gap_to_top:.1f} pts behind top available {row['pos']} ({top_row['name']})"
+        text = (
+            f"A solid {pos_label} option, though {gap_to_top:.0f} points behind the top "
+            f"{pos_label} still on the board ({top_row['name']})."
+        )
+        return text, 0.0
 
 
 adj_values, reasons = [], []
@@ -603,13 +653,23 @@ for _, row in available_all.iterrows():
     need_mult, need_reason = need_multiplier(view_team, row["pos"], bench_allowance, decay_rate)
     bye_mult, bye_reason = bye_collision_multiplier(view_team, row["pos"], row["bye"])
     total_mult = need_mult * bye_mult
-    adj_values.append(round(row["vbd_value"] * total_mult, 1))
-    parts = [scarcity_note(row), need_reason]
+
+    scarcity_text, scarcity_gap = scarcity_info(row)
+    scarcity_bonus = (scarcity_gap * scarcity_weight) if (scarcity_toggle and scarcity_gap > 0) else 0.0
+    adj_values.append(round(row["vbd_value"] * total_mult + scarcity_bonus, 1))
+
+    parts = [scarcity_text]
+    if scarcity_bonus > 0:
+        parts.append(f"(+{scarcity_bonus:.0f} added to his ranking for that scarcity)")
+    parts.append(need_reason)
     if bye_reason:
         parts.append(bye_reason)
     if pd.notna(row["steal_gap"]) and row["steal_gap"] >= steal_threshold:
-        parts.append(f"🔥 {int(row['steal_gap'])} picks past ADP ({int(row['adp_rank'])})")
-    reasons.append("; ".join(p for p in parts if p))
+        parts.append(
+            f"He's also fallen {int(row['steal_gap'])} picks past where he's normally taken — "
+            f"good value if he's still here."
+        )
+    reasons.append(" ".join(p for p in parts if p))
 
 available_all["adjusted_value"] = adj_values
 available_all["reason"] = reasons
