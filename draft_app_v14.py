@@ -284,15 +284,47 @@ st.sidebar.header("League Configuration")
 with st.sidebar.expander("Teams & draft order", expanded=not st.session_state.draft_started):
     num_teams = st.number_input("Number of teams", min_value=2, max_value=20,
                                  value=st.session_state.num_teams)
-    default_names = "\n".join(st.session_state.team_names[:num_teams] +
-                               [f"Team {i+1}" for i in range(len(st.session_state.team_names), num_teams)])
-    names_text = st.text_area("Team names (one per line)", value=default_names, height=150)
+
+    if "my_team_idx" not in st.session_state:
+        prior_idx = (st.session_state.team_names.index(st.session_state.my_team)
+                     if st.session_state.my_team in st.session_state.team_names else 0)
+        st.session_state.my_team_idx = prior_idx
+
+    # Detect a newly-clicked checkbox (any checkbox True that isn't the
+    # currently stored selection) BEFORE rendering this run's checkboxes,
+    # then force every other checkbox's state to False so exactly one stays
+    # checked -- this must happen before the widgets below are created.
+    for i in range(num_teams):
+        key = f"is_my_team_{i}"
+        if st.session_state.get(key) and i != st.session_state.my_team_idx:
+            st.session_state.my_team_idx = i
+            for j in range(num_teams):
+                if j != i:
+                    st.session_state[f"is_my_team_{j}"] = False
+            break
+
+    st.caption("Team names — check the box next to yours")
+    live_team_list = []
+    for i in range(num_teams):
+        c1, c2 = st.columns([1, 5])
+        with c1:
+            st.checkbox("", key=f"is_my_team_{i}", value=(i == st.session_state.my_team_idx),
+                        label_visibility="collapsed")
+        with c2:
+            default_val = (st.session_state.team_names[i]
+                            if i < len(st.session_state.team_names) else f"Team {i+1}")
+            name_val = st.text_input(
+                f"team_name_{i}", value=default_val, key=f"team_name_input_{i}",
+                label_visibility="collapsed"
+            )
+        live_team_list.append(name_val.strip() or f"Team {i+1}")
+
+    st.session_state.my_team = live_team_list[st.session_state.my_team_idx]
+
     snake = st.checkbox("Snake draft (order reverses each round)", value=st.session_state.snake)
 
     if st.button("Apply teams & order"):
-        team_list = [n.strip() for n in names_text.splitlines() if n.strip()][:num_teams]
-        while len(team_list) < num_teams:
-            team_list.append(f"Team {len(team_list)+1}")
+        team_list = live_team_list
         st.session_state.num_teams = num_teams
         st.session_state.team_names = team_list
         st.session_state.snake = snake
@@ -327,12 +359,6 @@ with st.sidebar.expander("Roster requirements"):
     total_rounds = (st.session_state.req_qb + st.session_state.req_rb + st.session_state.req_wr +
                     st.session_state.req_te + st.session_state.req_flex + st.session_state.req_bench)
     st.caption(f"Rounds implied by roster size: **{total_rounds}** (starters + flex + bench, excludes IR)")
-
-st.session_state.my_team = st.sidebar.selectbox(
-    "Which team is yours?", st.session_state.team_names,
-    index=st.session_state.team_names.index(st.session_state.my_team)
-    if st.session_state.my_team in st.session_state.team_names else 0
-)
 
 st.sidebar.markdown("---")
 with st.sidebar.expander("Value model tuning"):
