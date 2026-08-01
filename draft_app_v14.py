@@ -704,7 +704,15 @@ for i, row in enumerate(available_all.itertuples()):
     if pd.notna(adp_rank) and our_rank is not None:
         adp_rank_int = int(adp_rank)
         adp_round = math.ceil(adp_rank_int / ASSUMED_ADP_LEAGUE_SIZE)
-        our_round = math.ceil(our_rank / st.session_state.num_teams)
+        # our_rank is a rank among REMAINING players, not an absolute pick
+        # number -- project it forward from the current pick, since
+        # (our_rank - 1) other remaining players are expected to go before
+        # him starting from right now. Without this offset, someone ranked
+        # #1 among what's left would wrongly compute as "round 1" even in
+        # round 4, since ceil(1/num_teams) ignores how far the draft has
+        # already progressed.
+        expected_overall_pick = st.session_state.pick_number + our_rank - 1
+        our_round = math.ceil(expected_overall_pick / st.session_state.num_teams)
         round_diff = adp_round - our_round  # positive = we think he goes EARLIER (lower round) than ADP implies
 
         if round_diff >= 1:
