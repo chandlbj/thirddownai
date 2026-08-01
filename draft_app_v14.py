@@ -84,6 +84,21 @@ def load_raw():
 raw = load_raw()
 
 # ---- Session state defaults ----
+_default_req_qb, _default_req_rb, _default_req_wr, _default_req_te = 1, 2, 3, 1
+_default_req_flex, _default_req_bench = 1, 8
+
+# Sensible default position caps, derived from the actual roster config
+# instead of fixed numbers -- so the defaults can never sum to more than
+# the roster actually holds. Bench+flex slots are split across positions
+# using rough real-world draft tendencies (RB/WR get more bench depth than
+# QB/TE), then added on top of each position's required starters.
+_bench_and_flex_pool = _default_req_flex + _default_req_bench
+_pos_weights = {"QB": 0.15, "RB": 0.35, "WR": 0.35, "TE": 0.15}
+_default_max_qb = _default_req_qb + round(_bench_and_flex_pool * _pos_weights["QB"])
+_default_max_rb = _default_req_rb + round(_bench_and_flex_pool * _pos_weights["RB"])
+_default_max_wr = _default_req_wr + round(_bench_and_flex_pool * _pos_weights["WR"])
+_default_max_te = _default_req_te + round(_bench_and_flex_pool * _pos_weights["TE"])
+
 defaults = {
     "num_teams": 10,
     "team_names": [f"Team {i+1}" for i in range(10)],
@@ -109,19 +124,20 @@ defaults = {
     "sc_rec_2pt": 2.0,
     "sc_fum_lost": -2.0,
     # Roster defaults
-    "req_qb": 1,
-    "req_rb": 2,
-    "req_wr": 3,
-    "req_te": 1,
-    "req_flex": 1,
-    "req_bench": 8,
+    "req_qb": _default_req_qb,
+    "req_rb": _default_req_rb,
+    "req_wr": _default_req_wr,
+    "req_te": _default_req_te,
+    "req_flex": _default_req_flex,
+    "req_bench": _default_req_bench,
     # Personal caps: hard ceiling on total drafted at a position, separate
-    # from bench-depth penalties. Defaults generous enough not to change
-    # anyone's behavior unless they tighten them.
-    "max_qb": 3,
-    "max_rb": 6,
-    "max_wr": 7,
-    "max_te": 3,
+    # from bench-depth penalties. Computed from roster size above so the
+    # defaults never exceed what the roster can actually hold -- adjust
+    # manually in the sidebar if your roster config differs.
+    "max_qb": _default_max_qb,
+    "max_rb": _default_max_rb,
+    "max_wr": _default_max_wr,
+    "max_te": _default_max_te,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
