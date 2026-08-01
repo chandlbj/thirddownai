@@ -123,6 +123,8 @@ for k, v in defaults.items():
 FLEX_ELIGIBLE = {"RB", "WR", "TE"}
 POSITION_LABELS = {"QB": "quarterback", "RB": "running back", "WR": "wide receiver", "TE": "tight end"}
 FLEX_FILL_PENALTY = 3.0  # points subtracted when a pick only fills FLEX, not a genuinely required starter slot
+BENCH_DEPTH_PENALTY_PER_SLOT = 1.5  # mild additive penalty per still-useful bench slot
+EXCESS_DEPTH_BASE_PENALTY = 8.0  # steep additive penalty per slot once beyond bench allowance -- large enough to reliably sink "won't see the field" players regardless of raw VBD sign
 
 
 # ---- Point / VBD computation (recomputed live from current settings) ----
@@ -311,16 +313,23 @@ def need_multiplier(team_name, pos, bench_allowance, decay_rate):
     already_bench = max(already_bench, 0)
 
     if already_bench < bench_allowance:
-        mult = 0.85 * (0.9 ** already_bench)
-        return round(mult, 3), (
+        # Mild, additive penalty for "still useful but not urgent" bench depth.
+        penalty = already_bench * BENCH_DEPTH_PENALTY_PER_SLOT
+        return 1.0, (
             f"Your starters at {pos_label} are set, but this is still useful bench depth."
-        ), 0.0
+        ), -penalty
     else:
+        # A real, escalating additive penalty -- NOT a multiplier. A
+        # multiplicative discount backfires once a player's raw VBD goes
+        # negative (common late in the draft at an oversupplied position):
+        # multiplying a negative number by a fraction <1 moves it TOWARD
+        # zero, i.e. makes it look better, which is backwards. An additive
+        # penalty always pulls the value down regardless of sign.
         excess = already_bench - bench_allowance + 1
-        mult = 0.85 * (0.9 ** bench_allowance) * (decay_rate ** excess)
-        return round(mult, 3), (
+        penalty = EXCESS_DEPTH_BASE_PENALTY * excess * (2.0 - decay_rate)
+        return 1.0, (
             f"You already have plenty of {pos_label}s — this one won't likely see the field."
-        ), 0.0
+        ), -penalty
 
 
 def bye_collision_multiplier(team_name, pos, bye):
