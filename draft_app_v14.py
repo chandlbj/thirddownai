@@ -591,22 +591,19 @@ with st.expander(f"📋 {st.session_state.my_team}'s Roster So Far", expanded=Tr
     my_starters_pts, _, my_starters_detail = compute_team_projection(st.session_state.my_team)
     my_full_roster = get_roster_with_fpts(st.session_state.my_team)
     if my_full_roster:
-        running_compact = {p: 0 for p in REQUIRED_STARTERS}
-        compact_rows = []
-        for s in my_starters_detail:
-            pos = s["pos"]
-            if running_compact[pos] < REQUIRED_STARTERS[pos]:
-                running_compact[pos] += 1
-                slot_label = f"{pos}{running_compact[pos]}" if REQUIRED_STARTERS[pos] > 1 else pos
-            else:
-                slot_label = "FLEX"
-            compact_rows.append({"Slot": slot_label, "Player": s["name"]})
         starter_names_compact = {s["name"] for s in my_starters_detail}
         bench_count = len([p for p in my_full_roster if p["name"] not in starter_names_compact])
 
-        cols = st.columns(len(compact_rows) if compact_rows else 1)
-        for col, row in zip(cols, compact_rows):
-            col.markdown(f"**{row['Slot']}**  \n{row['Player']}")
+        by_pos_compact = {p: [] for p in REQUIRED_STARTERS}
+        for p in my_full_roster:
+            by_pos_compact.setdefault(p["pos"], []).append(p["name"])
+
+        cols = st.columns(len(REQUIRED_STARTERS))
+        for col, pos in zip(cols, REQUIRED_STARTERS):
+            names = by_pos_compact.get(pos, [])
+            names_html = "<br>".join(names) if names else "<span style='color:#999'>—</span>"
+            col.markdown(f"**{pos}**  \n{names_html}", unsafe_allow_html=True)
+
         st.caption(f"Projected starters: {my_starters_pts:.1f} pts  •  Bench: {bench_count} players")
     else:
         st.caption("No picks yet.")
