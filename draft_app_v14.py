@@ -675,7 +675,42 @@ available_all["adjusted_value"] = adj_values
 available_all["reason"] = reasons
 
 best_available_all = available_all.sort_values("vbd_value", ascending=False)
-recommended_all = available_all.sort_values("adjusted_value", ascending=False)
+recommended_all = available_all.sort_values("adjusted_value", ascending=False).reset_index(drop=True)
+
+# Now that we know our own ranking, compare it to each player's ADP (industry
+# consensus draft position) and explain any meaningful disagreement -- e.g.
+# "we have him ranked well ahead of his typical ADP" points straight back to
+# whatever drove that (scarcity bonus, need, etc.), so it's not just a
+# floating number with no explanation.
+rank_lookup = {name: i + 1 for i, name in enumerate(recommended_all["name"])}
+final_reasons = []
+for i, row in enumerate(available_all.itertuples()):
+    base_reason = reasons[i]
+    our_rank = rank_lookup.get(row.name)
+    adp_rank = row.adp_rank
+    adp_note = ""
+    if pd.notna(adp_rank) and our_rank is not None:
+        adp_rank_int = int(adp_rank)
+        diff = adp_rank_int - our_rank  # positive = we have him ranked earlier than his ADP
+        if diff >= 8:
+            adp_note = (
+                f" We have him ranked well ahead of his typical draft position (ADP {adp_rank_int}) "
+                f"— that's the scarcity/need factors above pulling him up."
+            )
+        elif diff >= 3:
+            adp_note = f" That's a bit ahead of his typical ADP ({adp_rank_int})."
+        elif diff <= -8:
+            adp_note = (
+                f" That's notably behind his typical ADP ({adp_rank_int}) — his fit for your "
+                f"team specifically doesn't stand out as much as his general market value."
+            )
+        elif diff <= -3:
+            adp_note = f" That's a bit behind his typical ADP ({adp_rank_int})."
+        else:
+            adp_note = f" That's right in line with his typical ADP ({adp_rank_int})."
+    final_reasons.append(base_reason + adp_note)
+
+available_all["reason"] = final_reasons
 
 # Top-3 sets and the TRUE top pick are always computed off the full pool --
 # never off whatever a position filter or search happens to narrow the view
