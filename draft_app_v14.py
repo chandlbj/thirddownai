@@ -475,7 +475,17 @@ st.sidebar.markdown("---")
 with st.sidebar.expander("Value model tuning"):
     bench_allowance = st.slider("Bench allowance per position (value model)", 0, 4, 2,
                                  help="How many picks beyond starters/flex still get solid value before steep decay. Separate from the roster bench-spot count above.")
-    decay_rate = st.slider("Excess-depth decay rate", 0.2, 0.8, 0.55, 0.05)
+    decay_rate = st.slider(
+        "Excess-depth decay rate", 0.2, 0.8, 0.55, 0.05,
+        help=(
+            "Controls how harshly a pick is penalized once you're already past your bench "
+            "allowance at that position (e.g. a 3rd or 4th player at a spot you don't need "
+            "more depth at). Lower = harsher penalty, so excess players sink further in the "
+            "rankings. Higher = more lenient, letting deep bench stashes still rank reasonably. "
+            "This only affects players BEYOND the bench allowance above -- it doesn't touch "
+            "required starters or FLEX-eligible picks."
+        )
+    )
     steal_threshold = st.slider(
         "Steal alert threshold (picks past ADP)", 5, 30, 15,
         help="Flag a player as a live steal once they've fallen this many picks past their expected (ADP) draft position."
