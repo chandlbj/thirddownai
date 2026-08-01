@@ -122,6 +122,7 @@ for k, v in defaults.items():
 
 FLEX_ELIGIBLE = {"RB", "WR", "TE"}
 POSITION_LABELS = {"QB": "quarterback", "RB": "running back", "WR": "wide receiver", "TE": "tight end"}
+FLEX_FILL_PENALTY = 3.0  # points subtracted when a pick only fills FLEX, not a genuinely required starter slot
 
 
 # ---- Point / VBD computation (recomputed live from current settings) ----
@@ -292,10 +293,17 @@ def need_multiplier(team_name, pos, bench_allowance, decay_rate):
     pos_label = POSITION_LABELS.get(pos, pos)
 
     if count < req:
-        return 1.0, f"You still need a starting {pos_label} ({count}/{req} filled) — this fills that spot."
+        return 1.0, f"You still need a starting {pos_label} ({count}/{req} filled) — this fills that spot.", 0.0
 
     if pos in FLEX_ELIGIBLE and st.session_state.flex_filled.get(team_name) is None:
-        return 1.0, f"This would fill your open FLEX spot."
+        # FLEX is a "best of what's left" slot, not a specific structural need
+        # the way an unfilled required starter is. A multiplicative discount
+        # doesn't reliably work here since scarcity bonus is additive and not
+        # scaled by it -- when VBD is near zero late in the draft, a <1x
+        # multiplier barely moves anything. Use a real additive penalty
+        # instead so a genuine roster hole elsewhere reliably wins close
+        # calls against a flex-only fill.
+        return 1.0, f"This would fill your open FLEX spot (not as urgent as a still-empty required starter elsewhere).", -FLEX_FILL_PENALTY
 
     already_bench = count - req
     if pos in FLEX_ELIGIBLE and st.session_state.flex_filled.get(team_name) == pos:
@@ -306,13 +314,13 @@ def need_multiplier(team_name, pos, bench_allowance, decay_rate):
         mult = 0.85 * (0.9 ** already_bench)
         return round(mult, 3), (
             f"Your starters at {pos_label} are set, but this is still useful bench depth."
-        )
+        ), 0.0
     else:
         excess = already_bench - bench_allowance + 1
         mult = 0.85 * (0.9 ** bench_allowance) * (decay_rate ** excess)
         return round(mult, 3), (
             f"You already have plenty of {pos_label}s — this one won't likely see the field."
-        )
+        ), 0.0
 
 
 def bye_collision_multiplier(team_name, pos, bye):
@@ -468,9 +476,9 @@ def auto_complete_draft(stop_before_team=None):
             break
         adj_vals = []
         for _, row in avail.iterrows():
-            nm, _ = need_multiplier(current_team, row["pos"], bench_allowance, decay_rate)
+            nm, _, need_penalty = need_multiplier(current_team, row["pos"], bench_allowance, decay_rate)
             bm, _ = bye_collision_multiplier(current_team, row["pos"], row["bye"])
-            adj_vals.append(row["vbd_value"] * nm * bm)
+            adj_vals.append(row["vbd_value"] * nm * bm + need_penalty)
         avail["_adj"] = adj_vals
         pick_row = avail.sort_values("_adj", ascending=False).iloc[0]
         mark_drafted(pick_row["name"], current_team)
@@ -718,13 +726,13 @@ def scarcity_info(row):
 
 adj_values, reasons = [], []
 for _, row in available_all.iterrows():
-    need_mult, need_reason = need_multiplier(view_team, row["pos"], bench_allowance, decay_rate)
+    need_mult, need_reason, need_penalty = need_multiplier(view_team, row["pos"], bench_allowance, decay_rate)
     bye_mult, bye_reason = bye_collision_multiplier(view_team, row["pos"], row["bye"])
     total_mult = need_mult * bye_mult
 
     scarcity_text, scarcity_gap = scarcity_info(row)
     scarcity_bonus = (scarcity_gap * scarcity_weight) if (scarcity_toggle and scarcity_gap > 0) else 0.0
-    adj_values.append(round(row["vbd_value"] * total_mult + scarcity_bonus, 1))
+    adj_values.append(round(row["vbd_value"] * total_mult + scarcity_bonus + need_penalty, 1))
 
     parts = [scarcity_text]
     if scarcity_bonus > 0:
@@ -859,13 +867,13 @@ if HAVE_ANTHROPIC:
                 st.warning(f"No player found matching '{ask_name}'.")
             else:
                 prow = match.iloc[0]
-                nm, nreason = need_multiplier(view_team, prow["pos"], bench_allowance, decay_rate)
+                nm, nreason, need_penalty = need_multiplier(view_team, prow["pos"], bench_allowance, decay_rate)
                 bm, breason = bye_collision_multiplier(view_team, prow["pos"], prow["bye"])
                 parts = [nreason]
                 if breason:
                     parts.append(breason)
                 reason_text = "; ".join(parts)
-                adj_val = round(prow["vbd_value"] * nm * bm, 1)
+                adj_val = round(prow["vbd_value"] * nm * bm + need_penalty, 1)
                 prow_dict = {
                     "name": prow["name"], "pos": prow["pos"], "team": prow["team"],
                     "vbd_value": prow["vbd_value"], "adjusted_value": adj_val,
