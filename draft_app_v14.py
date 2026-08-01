@@ -564,18 +564,52 @@ if len(steals) > 0:
         )
     st.markdown("---")
 
+# Positional scarcity: for each player, how do they compare to the next
+# (or top) available player at their SAME position? This is the actual
+# "why this position right now" argument -- a big gap to the next-best
+# option at that position is a real cliff (grab it now); a small gap means
+# the position stays deep and you could reasonably wait.
+pos_groups = {}
+for pos in REQUIRED_STARTERS:
+    pos_groups[pos] = (
+        available_all[available_all["pos"] == pos]
+        .sort_values("vbd_value", ascending=False)
+        .reset_index(drop=True)
+    )
+
+
+def scarcity_note(row):
+    pos_df = pos_groups.get(row["pos"])
+    if pos_df is None or len(pos_df) == 0:
+        return ""
+    matches = pos_df.index[pos_df["name"] == row["name"]]
+    if len(matches) == 0:
+        return ""
+    rank = matches[0]  # 0-based: 0 = best remaining at this position
+    if rank == 0:
+        if len(pos_df) > 1:
+            gap = row["vbd_value"] - pos_df.iloc[1]["vbd_value"]
+            next_name = pos_df.iloc[1]["name"]
+            return f"top {row['pos']} left, {gap:.1f} pts clear of next-best {next_name} — a real gap"
+        return f"only {row['pos']} left with real value"
+    else:
+        top_row = pos_df.iloc[0]
+        gap_to_top = top_row["vbd_value"] - row["vbd_value"]
+        return f"{gap_to_top:.1f} pts behind top available {row['pos']} ({top_row['name']})"
+
+
 adj_values, reasons = [], []
 for _, row in available_all.iterrows():
     need_mult, need_reason = need_multiplier(view_team, row["pos"], bench_allowance, decay_rate)
     bye_mult, bye_reason = bye_collision_multiplier(view_team, row["pos"], row["bye"])
     total_mult = need_mult * bye_mult
     adj_values.append(round(row["vbd_value"] * total_mult, 1))
-    parts = [need_reason]
+    parts = [scarcity_note(row), need_reason]
     if bye_reason:
         parts.append(bye_reason)
     if pd.notna(row["steal_gap"]) and row["steal_gap"] >= steal_threshold:
         parts.append(f"🔥 {int(row['steal_gap'])} picks past ADP ({int(row['adp_rank'])})")
-    reasons.append("; ".join(parts))
+    reasons.append("; ".join(p for p in parts if p))
 
 available_all["adjusted_value"] = adj_values
 available_all["reason"] = reasons
