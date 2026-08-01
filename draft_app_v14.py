@@ -18,6 +18,11 @@ v14 adds on top of v13:
   changes, not the code.
 - Added requirements.txt (streamlit, pandas, streamlit-keyup, anthropic),
   required for Streamlit Cloud to install dependencies on deploy.
+- Third Down AI branding: uses the REAL banner/icon image assets (assets/banner.png,
+  assets/icon.png -- must be committed to the repo alongside this file) and the
+  actual brand tagline "We show our work. We keep score." instead of invented
+  copy. Filename kept as draft_app_v14.py so the already-deployed Streamlit app
+  picks up the change on redeploy without needing its settings updated.
 
 v13 recap: AI Reasoning Layer ("Why this pick?" + ask-about-any-player).
 v12 recap: absolute (not curved) draft grading.
@@ -55,7 +60,7 @@ except ImportError:
 RAW_FILE = "raw_projections_2026.csv"
 ADP_FILE = "adp_data_2026.csv"
 
-st.set_page_config(page_title="Third Down AI - Draft Assistant", layout="wide")
+st.set_page_config(page_title="Third Down AI - Draft Assistant", page_icon="assets/icon.png", layout="wide")
 
 
 @st.cache_data
@@ -466,7 +471,12 @@ if st.sidebar.button("Reset entire draft"):
 
 
 # ============ MAIN PANEL ============
-st.title("Third Down AI — Draft Assistant (v14)")
+st.image("assets/banner_cropped.png", use_container_width=True)
+st.markdown(
+    "<div style='color:#2FB35E; font-size:16px; font-weight:600; margin-top:-8px; margin-bottom:12px;'>"
+    "Draft Assistant</div>",
+    unsafe_allow_html=True,
+)
 
 total_rounds = (st.session_state.req_qb + st.session_state.req_rb + st.session_state.req_wr +
                 st.session_state.req_te + st.session_state.req_flex + st.session_state.req_bench)
@@ -982,3 +992,19 @@ else:
         f"_Draft in progress ({total_picks_completed}/{total_picks_needed} picks made) -- "
         "grades available once complete, or check the preview box above."
     )
+
+st.markdown(
+    """
+    <div style="
+        margin-top: 40px;
+        padding-top: 14px;
+        border-top: 1px solid #1a2540;
+        text-align: center;
+        color: #2FB35E;
+        font-size: 12px;
+    ">
+        <b>THIRD DOWN AI</b> — We show our work. We keep score.
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
