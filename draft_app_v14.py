@@ -239,6 +239,52 @@ def roster_counts(team_name):
     return counts
 
 
+def get_roster_with_fpts(team_name):
+    roster = st.session_state.team_rosters.get(team_name, [])
+    result = []
+    for p in roster:
+        match = board.loc[board["name"] == p["name"]]
+        fpts = float(match.iloc[0]["fpts"]) if not match.empty else 0.0
+        result.append({**p, "fpts": fpts})
+    return result
+
+
+def compute_team_projection(team_name):
+    """
+    Returns (starters_points, total_points, starters_detail) for a team,
+    using the optimal starting lineup (best players at each required
+    position + best remaining flex-eligible players for FLEX slots) out
+    of whatever they've drafted so far.
+    """
+    roster_fpts = get_roster_with_fpts(team_name)
+    if not roster_fpts:
+        return 0.0, 0.0, []
+
+    total_points = sum(r["fpts"] for r in roster_fpts)
+
+    by_pos = {}
+    for r in roster_fpts:
+        by_pos.setdefault(r["pos"], []).append(r)
+    for p in by_pos:
+        by_pos[p].sort(key=lambda r: -r["fpts"])
+
+    starters = []
+    for pos, req in REQUIRED_STARTERS.items():
+        starters.extend(by_pos.get(pos, [])[:req])
+
+    used_names = {r["name"] for r in starters}
+    flex_candidates = []
+    for pos in FLEX_ELIGIBLE:
+        flex_candidates.extend(
+            [r for r in by_pos.get(pos, []) if r["name"] not in used_names]
+        )
+    flex_candidates.sort(key=lambda r: -r["fpts"])
+    starters.extend(flex_candidates[: st.session_state.req_flex])
+
+    starters_points = sum(r["fpts"] for r in starters)
+    return round(starters_points, 1), round(total_points, 1), starters
+
+
 def need_multiplier(team_name, pos, bench_allowance, decay_rate):
     counts = roster_counts(team_name)
     count = counts[pos]
@@ -540,6 +586,30 @@ st.markdown(
     f"### On the clock: **{on_clock_team}**  |  Round {round_num} of {total_rounds}, "
     f"Pick {st.session_state.pick_number}"
 )
+
+with st.expander(f"📋 {st.session_state.my_team}'s Roster So Far", expanded=True):
+    my_starters_pts, _, my_starters_detail = compute_team_projection(st.session_state.my_team)
+    my_full_roster = get_roster_with_fpts(st.session_state.my_team)
+    if my_full_roster:
+        running_compact = {p: 0 for p in REQUIRED_STARTERS}
+        compact_rows = []
+        for s in my_starters_detail:
+            pos = s["pos"]
+            if running_compact[pos] < REQUIRED_STARTERS[pos]:
+                running_compact[pos] += 1
+                slot_label = f"{pos}{running_compact[pos]}" if REQUIRED_STARTERS[pos] > 1 else pos
+            else:
+                slot_label = "FLEX"
+            compact_rows.append({"Slot": slot_label, "Player": s["name"]})
+        starter_names_compact = {s["name"] for s in my_starters_detail}
+        bench_count = len([p for p in my_full_roster if p["name"] not in starter_names_compact])
+
+        cols = st.columns(len(compact_rows) if compact_rows else 1)
+        for col, row in zip(cols, compact_rows):
+            col.markdown(f"**{row['Slot']}**  \n{row['Player']}")
+        st.caption(f"Projected starters: {my_starters_pts:.1f} pts  •  Bench: {bench_count} players")
+    else:
+        st.caption("No picks yet.")
 
 col1, col2, col3 = st.columns([1, 2, 2])
 with col1:
@@ -852,52 +922,6 @@ for i, (_, row) in enumerate(recommended_list):
         if st.session_state.get("ai_explanation_top_player") == row["name"]:
             st.info(st.session_state.get("ai_explanation_top", ""))
 
-def get_roster_with_fpts(team_name):
-    roster = st.session_state.team_rosters.get(team_name, [])
-    result = []
-    for p in roster:
-        match = board.loc[board["name"] == p["name"]]
-        fpts = float(match.iloc[0]["fpts"]) if not match.empty else 0.0
-        result.append({**p, "fpts": fpts})
-    return result
-
-
-def compute_team_projection(team_name):
-    """
-    Returns (starters_points, total_points, starters_detail) for a team,
-    using the optimal starting lineup (best players at each required
-    position + best remaining flex-eligible players for FLEX slots) out
-    of whatever they've drafted so far.
-    """
-    roster_fpts = get_roster_with_fpts(team_name)
-    if not roster_fpts:
-        return 0.0, 0.0, []
-
-    total_points = sum(r["fpts"] for r in roster_fpts)
-
-    by_pos = {}
-    for r in roster_fpts:
-        by_pos.setdefault(r["pos"], []).append(r)
-    for p in by_pos:
-        by_pos[p].sort(key=lambda r: -r["fpts"])
-
-    starters = []
-    for pos, req in REQUIRED_STARTERS.items():
-        starters.extend(by_pos.get(pos, [])[:req])
-
-    used_names = {r["name"] for r in starters}
-    flex_candidates = []
-    for pos in FLEX_ELIGIBLE:
-        flex_candidates.extend(
-            [r for r in by_pos.get(pos, []) if r["name"] not in used_names]
-        )
-    flex_candidates.sort(key=lambda r: -r["fpts"])
-    starters.extend(flex_candidates[: st.session_state.req_flex])
-
-    starters_points = sum(r["fpts"] for r in starters)
-    return round(starters_points, 1), round(total_points, 1), starters
-
-
 st.markdown("---")
 st.subheader("🏆 Team Power Rankings (live)")
 st.caption(
@@ -918,7 +942,13 @@ for t in st.session_state.team_names:
 
 rank_df = pd.DataFrame(rank_rows).sort_values("Starters Pts", ascending=False).reset_index(drop=True)
 rank_df.insert(0, "Rank", range(1, len(rank_df) + 1))
-st.dataframe(rank_df, use_container_width=True, hide_index=True)
+st.dataframe(
+    rank_df, use_container_width=True, hide_index=True,
+    column_config={
+        "Starters Pts": st.column_config.NumberColumn(format="%.1f"),
+        "Total Roster Pts": st.column_config.NumberColumn(format="%.1f"),
+    },
+)
 
 st.markdown("---")
 st.subheader(f"{st.session_state.my_team}'s Roster")
@@ -939,7 +969,7 @@ if full_roster:
             label = "FLEX"
         slot_rows.append({"Slot": label, "Player": s["name"], "Team": s["team"],
                            "Bye": f"Week {s['bye']}" if s["bye"] is not None else "N/A",
-                           "Proj Pts": round(s["fpts"], 1)})
+                           "Proj Pts": f"{s['fpts']:.1f}"})
 
     st.write(f"**Starters** — projected {starters_pts:.1f} pts")
     st.table(pd.DataFrame(slot_rows))
@@ -950,7 +980,7 @@ if full_roster:
         bench_rows = [{
             "Player": p["name"], "Pos": p["pos"], "Team": p["team"],
             "Bye": f"Week {p['bye']}" if p["bye"] is not None else "N/A",
-            "Proj Pts": round(p["fpts"], 1),
+            "Proj Pts": f"{p['fpts']:.1f}",
         } for p in bench]
         st.write(f"**Bench** ({len(bench)})")
         st.table(pd.DataFrame(bench_rows))
