@@ -1,34 +1,42 @@
 """
-Third Down AI - Draft Assistant (v14)
+Third Down AI - Draft Assistant (v14 -- live data update)
 Run with: python -m streamlit run draft_app_v14.py
 
-Requires: pip install streamlit-keyup   (for live, as-you-type search)
-Requires: pip install anthropic          (for the AI reasoning layer)
+Requires: pip install streamlit-keyup anthropic requests
 Requires: adp_data_2026.csv in the same folder (ADP data, merged in automatically)
-Requires: an Anthropic API key -- checked in this order:
-          1. Streamlit Cloud secrets (st.secrets["ANTHROPIC_API_KEY"]) -- for
-             the hosted/deployed version, set under the app's Secrets settings
-          2. OS environment variable ANTHROPIC_API_KEY -- for local use
-          3. Manual sidebar input (session only, never saved) -- fallback
+Requires: an Anthropic API key (see below) -- optional, only for AI explanations.
+Requires: a FantasyPros API key (free personal-use tier) -- optional; without
+          one, the app falls back to the static local raw_projections_2026.csv.
+          Checked in this order: st.secrets["FANTASYPROS_API_KEY"], then the
+          FANTASYPROS_API_KEY environment variable, then a manual sidebar
+          input (session only).
 
-v14 adds on top of v13:
-- API key lookup now also checks Streamlit Cloud's st.secrets, so the exact
-  same file works unchanged whether run locally or deployed to Streamlit
-  Community Cloud for sharing with the league -- only where the key lives
-  changes, not the code.
-- Added requirements.txt (streamlit, pandas, streamlit-keyup, anthropic),
-  required for Streamlit Cloud to install dependencies on deploy.
-- Third Down AI branding: uses the REAL banner/icon image assets (assets/banner.png,
-  assets/banner_cropped.png, assets/icon.png -- must be committed to the repo
-  alongside this file) and the actual brand tagline "We show our work. We keep
-  score." instead of invented copy. Filename kept as draft_app_v14.py so the
-  already-deployed Streamlit app picks up the change on redeploy without
-  needing its settings updated.
-- UI cleanup: "Value model tuning" is now a collapsible sidebar expander,
-  consistent with the other config sections. The "AI Reasoning Layer" sidebar
-  section is now fully hidden once a key is resolved from Streamlit secrets
-  or the environment (the normal deployed/tester experience) -- it only
-  appears at all when someone genuinely needs to type a key in manually.
+THIS UPDATE -- live projections + injury status:
+- Projections now fetch live from FantasyPros (QB/RB/WR/TE season-long,
+  full per-stat breakdown) when a key is available, replacing the static
+  CSV -- falls back gracefully to the static file on any fetch failure,
+  with a visible warning rather than a silent break. Cached 12 hours to
+  respect the free tier's 50-requests/day limit; a sidebar button forces
+  a manual refresh.
+- Injury status now pulled from Sleeper's free API (no key required) and
+  matched in by player name -- flagged directly in the reasoning text
+  ("⚠️ Currently listed as Questionable...") rather than just displayed
+  separately. Note: FantasyPros' own API does NOT expose a clean structured
+  injury field (only free-text news articles), which is why Sleeper is
+  used for this specific piece.
+- Added Return TD to the scoring engine (sc_return_td, default 6 pts) --
+  this was in Brad's actual league scoring from the start but had been
+  missing from the app; FantasyPros' data includes ret_tds so this was
+  fixed while wiring in the live source.
+- "Last updated" caption now shows the real live-fetch timestamp when using
+  live data, or the static file's last-modified time as a fallback signal.
+- Schedule/matchup strength was explicitly discussed and deferred: for a
+  season-long redraft tool, schedule effects roughly average out over 17
+  games and matter far more for weekly start/sit decisions -- a separate,
+  future in-season feature, not part of the draft-day value engine.
+
+Anthropic API key resolution order (unchanged): st.secrets, then env var,
+then manual sidebar input.
 
 v13 recap: AI Reasoning Layer ("Why this pick?" + ask-about-any-player).
 v12 recap: absolute (not curved) draft grading.
@@ -43,7 +51,7 @@ v10 recap: sidebar auto-draft ("Others" / "All").
 
 Still not included (future work):
 - Position-run detector, positional heatmap, shareable recap card,
-  live web-search-backed injury/news context for the AI layer
+  schedule/matchup-adjusted weekly projections (separate in-season feature)
 """
 
 import streamlit as st
@@ -51,6 +59,13 @@ import pandas as pd
 import random
 import os
 import math
+from datetime import datetime
+
+try:
+    import requests
+    HAVE_REQUESTS = True
+except ImportError:
+    HAVE_REQUESTS = False
 
 try:
     import anthropic
@@ -66,19 +81,151 @@ except ImportError:
 
 RAW_FILE = "raw_projections_2026.csv"
 ADP_FILE = "adp_data_2026.csv"
+FANTASYPROS_BASE = "https://api.fantasypros.com/public/v2/json"
+SLEEPER_PLAYERS_URL = "https://api.sleeper.app/v1/players/nfl"
+
+# Same team->bye mapping used to build the original static dataset. The live
+# FantasyPros projections endpoint doesn't include bye weeks, so this has to
+# be supplied separately regardless of data source.
+TEAM_BYE_WEEKS = {
+    'ARI': 14, 'ATL': 11, 'BAL': 13, 'BUF': 7, 'CAR': 5, 'CHI': 10, 'CIN': 6,
+    'CLE': 11, 'DAL': 14, 'DEN': 10, 'DET': 6, 'GB': 11, 'HOU': 8, 'IND': 13,
+    'JAX': 7, 'KC': 5, 'LAC': 7, 'LAR': 11, 'LV': 13, 'MIA': 6, 'MIN': 6,
+    'NE': 11, 'NO': 8, 'NYG': 8, 'NYJ': 13, 'PHI': 10, 'PIT': 9, 'SEA': 11,
+    'SF': 8, 'TB': 10, 'TEN': 9, 'WAS': 7,
+}
 
 st.set_page_config(page_title="Third Down AI - Draft Assistant", page_icon="assets/icon.png", layout="wide")
 
 
+def get_fantasypros_key():
+    try:
+        key = st.secrets.get("FANTASYPROS_API_KEY", "")
+    except Exception:
+        key = ""
+    if not key:
+        key = os.environ.get("FANTASYPROS_API_KEY", "")
+    return key
+
+
+@st.cache_data(ttl=12 * 3600, show_spinner="Fetching live projections from FantasyPros...")
+def fetch_live_projections(api_key, season=2026, scoring="PPR"):
+    """
+    Fetches season-long projections for QB/RB/WR/TE from FantasyPros and
+    reshapes them into the same raw-stat columns the rest of the app already
+    expects (pass_yds, rush_td, rec_rec, etc.) -- so nothing downstream needs
+    to change, only where the numbers come from.
+
+    Two known simplifications, both flagged clearly rather than silently
+    assumed:
+    - FantasyPros' "fumbles" field is treated as fumbles LOST (the fantasy-
+      relevant stat), matching our fum_lost column's meaning.
+    - FantasyPros gives a single combined "2pt_tds" field (not split by
+      pass/rush/rec). We put the whole value into rush_2pt and zero the
+      other two 2pt columns, so it's counted exactly once.
+    """
+    headers = {"x-api-key": api_key}
+    rows = []
+    for pos in ["QB", "RB", "WR", "TE"]:
+        resp = requests.get(
+            f"{FANTASYPROS_BASE}/nfl/{season}/projections",
+            headers=headers, params={"position": pos, "scoring": scoring, "week": "0"},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        for p in data.get("players", []):
+            s = p.get("stats", {})
+            rows.append({
+                "name": p.get("name", ""),
+                "pos": pos,
+                "team": p.get("team_id", ""),
+                "pass_yds": s.get("pass_yds", 0.0) or 0.0,
+                "pass_td": s.get("pass_tds", 0.0) or 0.0,
+                "pass_int": s.get("pass_ints", 0.0) or 0.0,
+                "pass_2pt": 0.0,
+                "rush_yds": s.get("rush_yds", 0.0) or 0.0,
+                "rush_td": s.get("rush_tds", 0.0) or 0.0,
+                "rush_2pt": s.get("2pt_tds", 0.0) or 0.0,  # combined 2pt field lives here, see docstring
+                "rec": s.get("rec_rec", 0.0) or 0.0,
+                "rec_yds": s.get("rec_yds", 0.0) or 0.0,
+                "rec_td": s.get("rec_tds", 0.0) or 0.0,
+                "rec_2pt": 0.0,
+                "fum_lost": s.get("fumbles", 0.0) or 0.0,
+                "ret_td": s.get("ret_tds", 0.0) or 0.0,
+            })
+    df = pd.DataFrame(rows)
+    df["bye"] = df["team"].map(TEAM_BYE_WEEKS)
+    return df, datetime.now()
+
+
+@st.cache_data(ttl=24 * 3600, show_spinner="Checking injury statuses from Sleeper...")
+def fetch_sleeper_injuries():
+    """
+    Free, no-key-required injury status lookup. Sleeper's full player list
+    is a large single response -- cached for a full day per their own
+    'use sparingly' guidance. Returns {normalized_name: injury_status}.
+    """
+    resp = requests.get(SLEEPER_PLAYERS_URL, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+    lookup = {}
+    for _, p in data.items():
+        name = f"{p.get('first_name', '')} {p.get('last_name', '')}".strip()
+        status = p.get("injury_status")
+        if name and status:
+            lookup[name.lower()] = status
+    return lookup
+
+
 @st.cache_data
-def load_raw():
+def load_static_raw():
     raw_df = pd.read_csv(RAW_FILE)
+    if "ret_td" not in raw_df.columns:
+        raw_df["ret_td"] = 0.0
     try:
         adp_df = pd.read_csv(ADP_FILE)[["name", "adp_rank"]]
         raw_df = raw_df.merge(adp_df, on="name", how="left")
     except FileNotFoundError:
         raw_df["adp_rank"] = None
     return raw_df
+
+
+def load_raw():
+    """
+    Tries live FantasyPros data first (if a key is available and requests
+    is installed); falls back to the static local CSV on any failure, with
+    a clear on-screen warning rather than a silent/confusing break.
+    """
+    api_key = get_fantasypros_key()
+    if api_key and HAVE_REQUESTS:
+        try:
+            live_df, fetched_at = fetch_live_projections(api_key)
+            st.session_state["data_source"] = "live"
+            st.session_state["data_fetched_at"] = fetched_at
+            try:
+                adp_df = pd.read_csv(ADP_FILE)[["name", "adp_rank"]]
+                live_df = live_df.merge(adp_df, on="name", how="left")
+            except FileNotFoundError:
+                live_df["adp_rank"] = None
+            return live_df
+        except Exception as e:
+            st.warning(f"Live projections fetch failed ({e}) -- using local static data instead.")
+    st.session_state["data_source"] = "static"
+    return load_static_raw()
+
+
+def get_data_last_updated():
+    """Returns a human-readable freshness timestamp -- either the actual
+    live-fetch time, or the static file's last-modified time as a fallback
+    signal, never just 'today'."""
+    if st.session_state.get("data_source") == "live" and st.session_state.get("data_fetched_at"):
+        return st.session_state["data_fetched_at"].strftime("%b %d, %Y at %I:%M %p") + " (live)"
+    try:
+        mtime = os.path.getmtime(RAW_FILE)
+        return datetime.fromtimestamp(mtime).strftime("%b %d, %Y at %I:%M %p") + " (static file)"
+    except OSError:
+        return "unknown"
 
 
 raw = load_raw()
@@ -123,6 +270,7 @@ defaults = {
     "sc_rec_td": 6.0,
     "sc_rec_2pt": 2.0,
     "sc_fum_lost": -2.0,
+    "sc_return_td": 6.0,
     # Roster defaults
     "req_qb": _default_req_qb,
     "req_rb": _default_req_rb,
@@ -167,6 +315,7 @@ def compute_board():
         + df["rec_td"] * s["sc_rec_td"]
         + df["rec_2pt"] * s["sc_rec_2pt"]
         + df["fum_lost"] * s["sc_fum_lost"]
+        + df.get("ret_td", 0) * s["sc_return_td"]
     ).round(2)
 
     required = {"QB": s["req_qb"], "RB": s["req_rb"], "WR": s["req_wr"], "TE": s["req_te"]}
@@ -206,6 +355,18 @@ def compute_board():
 
 
 board, REQUIRED_STARTERS, position_baselines = compute_board()
+
+# Attach injury status where available (free, no-key Sleeper lookup, matched
+# by name). Failure here should never break the app -- injuries are a nice-
+# to-have layer, not a dependency.
+if HAVE_REQUESTS:
+    try:
+        _injury_lookup = fetch_sleeper_injuries()
+        board["injury_status"] = board["name"].str.lower().map(_injury_lookup)
+    except Exception:
+        board["injury_status"] = None
+else:
+    board["injury_status"] = None
 
 
 def get_team_on_clock(pick_number, team_names, snake):
@@ -448,6 +609,7 @@ with st.sidebar.expander("Scoring system"):
     st.session_state.sc_rec_td = st.number_input("Receiving TD", value=st.session_state.sc_rec_td)
     st.session_state.sc_rec_2pt = st.number_input("2-pt conversion (rec)", value=st.session_state.sc_rec_2pt)
     st.session_state.sc_fum_lost = st.number_input("Fumble lost", value=st.session_state.sc_fum_lost)
+    st.session_state.sc_return_td = st.number_input("Return TD", value=st.session_state.sc_return_td)
 
 with st.sidebar.expander("Roster requirements"):
     st.session_state.req_qb = st.number_input("QB starters", min_value=0, max_value=3, value=st.session_state.req_qb)
@@ -584,6 +746,31 @@ elif HAVE_ANTHROPIC:
         "against your usage. Nothing is sent unless you click an explain button."
     )
 
+st.sidebar.markdown("---")
+st.sidebar.subheader("Live Data")
+_fp_secrets_key = ""
+try:
+    _fp_secrets_key = st.secrets.get("FANTASYPROS_API_KEY", "")
+except Exception:
+    pass
+_fp_env_key = os.environ.get("FANTASYPROS_API_KEY", "")
+if not (_fp_secrets_key or _fp_env_key) and HAVE_REQUESTS:
+    fp_key_input = st.sidebar.text_input(
+        "FantasyPros API key (session only, never saved to disk)",
+        type="password", value=st.session_state.get("_manual_fp_key", "")
+    )
+    st.session_state["_manual_fp_key"] = fp_key_input
+    if fp_key_input:
+        os.environ["FANTASYPROS_API_KEY"] = fp_key_input  # picked up by get_fantasypros_key() this session only
+
+source_label = "🟢 Live (FantasyPros)" if st.session_state.get("data_source") == "live" else "⚪ Static local file"
+st.sidebar.caption(f"Data source: {source_label}")
+st.sidebar.caption(f"Last updated: {get_data_last_updated()}")
+if st.sidebar.button("🔄 Refresh live data now"):
+    fetch_live_projections.clear()
+    fetch_sleeper_injuries.clear()
+    st.rerun()
+
 
 def get_ai_take(player_row, team_name, reason_text):
     """
@@ -640,10 +827,11 @@ if st.sidebar.button("Reset entire draft"):
 # ============ MAIN PANEL ============
 st.image("assets/banner_cropped.png", use_container_width=True)
 st.markdown(
-    "<div style='color:#2FB35E; font-size:16px; font-weight:600; margin-top:-8px; margin-bottom:12px;'>"
+    "<div style='color:#2FB35E; font-size:16px; font-weight:600; margin-top:-8px; margin-bottom:2px;'>"
     "Draft Assistant</div>",
     unsafe_allow_html=True,
 )
+st.caption(f"📅 Projections data last updated: {get_data_last_updated()}")
 
 total_rounds = (st.session_state.req_qb + st.session_state.req_rb + st.session_state.req_wr +
                 st.session_state.req_te + st.session_state.req_flex + st.session_state.req_bench)
@@ -795,6 +983,9 @@ for _, row in available_all.iterrows():
     adj_values.append(round(row["vbd_value"] * total_mult + scarcity_bonus + need_penalty, 1))
 
     parts = [scarcity_text]
+    injury_status = row.get("injury_status")
+    if pd.notna(injury_status) and injury_status:
+        parts.append(f"⚠️ Currently listed as {injury_status} — worth watching before you commit a pick here.")
     if scarcity_bonus > 0:
         parts.append(f"(+{scarcity_bonus:.0f} added to his ranking for that scarcity)")
     parts.append(need_reason)
