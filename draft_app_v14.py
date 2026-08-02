@@ -59,6 +59,7 @@ import pandas as pd
 import random
 import os
 import math
+import re
 from datetime import datetime
 
 try:
@@ -159,6 +160,25 @@ def fetch_live_projections(api_key, season=2026, scoring="PPR"):
     return df, datetime.now()
 
 
+def normalize_player_name(name):
+    """Lowercase, strip ALL punctuation (periods, apostrophes, hyphens), and
+    strip common suffixes -- so names match across sources that format them
+    differently (e.g. 'A.J. Brown' vs 'AJ Brown', "Ja'Marr Chase" vs 'Jamarr
+    Chase', 'Amon-Ra St. Brown' vs 'Amonra St Brown', 'Travis Etienne Jr.' vs
+    a source that omits the suffix). Applied identically to both sides of
+    any name match, so the exact internal format doesn't matter as long as
+    it's consistent."""
+    if not name:
+        return ""
+    n = re.sub(r"[^a-z0-9\s]", "", name.lower())
+    n = re.sub(r"\s+", " ", n).strip()
+    for suffix in [" jr", " sr", " ii", " iii", " iv"]:
+        if n.endswith(suffix):
+            n = n[: -len(suffix)].strip()
+            break
+    return n
+
+
 @st.cache_data(ttl=24 * 3600, show_spinner="Checking injury statuses from Sleeper...")
 def fetch_sleeper_injuries():
     """
@@ -174,7 +194,7 @@ def fetch_sleeper_injuries():
         name = f"{p.get('first_name', '')} {p.get('last_name', '')}".strip()
         status = p.get("injury_status")
         if name and status:
-            lookup[name.lower()] = status
+            lookup[normalize_player_name(name)] = status
     return lookup
 
 
@@ -362,7 +382,7 @@ board, REQUIRED_STARTERS, position_baselines = compute_board()
 if HAVE_REQUESTS:
     try:
         _injury_lookup = fetch_sleeper_injuries()
-        board["injury_status"] = board["name"].str.lower().map(_injury_lookup)
+        board["injury_status"] = board["name"].apply(normalize_player_name).map(_injury_lookup)
     except Exception:
         board["injury_status"] = None
 else:
