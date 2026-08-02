@@ -20,6 +20,7 @@ import streamlit as st
 import pandas as pd
 import os
 import math
+from datetime import datetime
 
 try:
     import requests
@@ -93,7 +94,7 @@ def fetch_live_projections(api_key, season=2026, scoring="PPR"):
             })
     df = pd.DataFrame(rows)
     df["bye"] = df["team"].map(TEAM_BYE_WEEKS)
-    return df
+    return df, datetime.now()
 
 
 @st.cache_data
@@ -104,14 +105,38 @@ def load_static_raw():
     return raw_df
 
 
+def merge_live_with_static(live_df, static_df):
+    """FantasyPros' free tier truncates responses to ~10 players per
+    position -- merge live data in for whichever players it covers,
+    keeping the full static file for the rest so the list stays complete."""
+    merged = static_df.copy()
+    live_indexed = live_df.set_index("name")
+    overlap_cols = [c for c in
+                    ["team", "bye", "pass_yds", "pass_td", "pass_int", "pass_2pt",
+                     "rush_yds", "rush_td", "rush_2pt", "rec", "rec_yds", "rec_td",
+                     "rec_2pt", "fum_lost", "ret_td"]
+                    if c in live_indexed.columns]
+    for col in overlap_cols:
+        live_values = merged["name"].map(live_indexed[col])
+        merged[col] = live_values.combine_first(merged[col])
+    new_players = live_df[~live_df["name"].isin(merged["name"])]
+    if len(new_players) > 0:
+        merged = pd.concat([merged, new_players], ignore_index=True)
+    return merged
+
+
 def load_raw():
+    static_df = load_static_raw()
     api_key = get_fantasypros_key()
     if api_key and HAVE_REQUESTS:
         try:
-            return fetch_live_projections(api_key)
+            live_df, fetched_at = fetch_live_projections(api_key)
+            st.session_state["_projections_fetch_signature"] = fetched_at
+            return merge_live_with_static(live_df, static_df)
         except Exception:
             pass
-    return load_static_raw()
+    st.session_state["_projections_fetch_signature"] = None
+    return static_df
 
 
 raw = load_raw()
@@ -167,6 +192,48 @@ def compute_points_and_vbd(df, s):
 
 board = compute_points_and_vbd(raw, st.session_state)
 
+# Stat-change tracking ("we show our work"): compare this fetch against the
+# previous one and remember what changed, so the table can show a ▲/▼ and
+# the delta next to any stat that moved -- including overall projected
+# points, which drives the "biggest change" sort option. Only recompute
+# when a genuinely NEW fetch happened (tracked via the fetch timestamp
+# signature) -- a trivial rerun (typing in search, changing the position
+# filter) reuses the same cached data and shouldn't reset the comparison.
+DELTA_STAT_COLS = ["pass_yds", "pass_td", "pass_int", "rush_yds", "rush_td", "rec", "rec_yds", "rec_td"]
+SNAPSHOT_COLS = DELTA_STAT_COLS + ["fpts"]
+current_signature = st.session_state.get("_projections_fetch_signature")
+last_seen_signature = st.session_state.get("_projections_last_signature")
+
+if current_signature is not None and current_signature != last_seen_signature:
+    prev_snapshot = st.session_state.get("_projections_prev_snapshot")
+    if prev_snapshot is not None:
+        deltas = {}
+        pts_deltas = {}
+        for _, row in board.iterrows():
+            prev_row = prev_snapshot.get(row["name"])
+            if prev_row is None:
+                continue
+            row_deltas = {}
+            for col in DELTA_STAT_COLS:
+                change = round(row[col] - prev_row.get(col, row[col]), 1)
+                if abs(change) >= 0.5:  # ignore trivial noise-level rounding shifts
+                    row_deltas[col] = change
+            if row_deltas:
+                deltas[row["name"]] = row_deltas
+            pts_change = round(row["fpts"] - prev_row.get("fpts", row["fpts"]), 1)
+            if abs(pts_change) >= 0.5:
+                pts_deltas[row["name"]] = pts_change
+        st.session_state["_projections_deltas"] = deltas
+        st.session_state["_projections_pts_deltas"] = pts_deltas
+    st.session_state["_projections_prev_snapshot"] = {
+        r["name"]: {c: r[c] for c in SNAPSHOT_COLS} for _, r in board.iterrows()
+    }
+    st.session_state["_projections_last_signature"] = current_signature
+
+stat_deltas = st.session_state.get("_projections_deltas", {})
+pts_deltas = st.session_state.get("_projections_pts_deltas", {})
+board["_pts_delta"] = board["name"].map(pts_deltas).fillna(0.0)
+
 st.image("assets/banner_cropped.png", use_container_width=True)
 st.title("All Projections")
 st.caption(
@@ -180,7 +247,9 @@ with col1:
 with col2:
     search = st.text_input("Search player name")
 with col3:
-    sort_by = st.selectbox("Sort by", ["VBD Value", "Projected Points"])
+    sort_by = st.selectbox(
+        "Sort by", ["VBD Value", "Projected Points", "Biggest Increase", "Biggest Decrease"]
+    )
 
 view = board.copy()
 if pos_filter != "ALL":
@@ -188,20 +257,86 @@ if pos_filter != "ALL":
 if search:
     view = view[view["name"].str.contains(search, case=False, na=False)]
 
-sort_col = "vbd_value" if sort_by == "VBD Value" else "fpts"
-view = view.sort_values(sort_col, ascending=False).reset_index(drop=True)
+if sort_by == "Biggest Increase":
+    view = view[view["_pts_delta"] > 0]
+    view = view.sort_values("_pts_delta", ascending=False).reset_index(drop=True)
+elif sort_by == "Biggest Decrease":
+    view = view[view["_pts_delta"] < 0]
+    view = view.sort_values("_pts_delta", ascending=True).reset_index(drop=True)
+else:
+    sort_col = "vbd_value" if sort_by == "VBD Value" else "fpts"
+    view = view.sort_values(sort_col, ascending=False).reset_index(drop=True)
 view.insert(0, "Rank", range(1, len(view) + 1))
 
-display_df = view[["Rank", "name", "pos", "team", "bye", "fpts", "vbd_value", "adp_rank"]].copy()
-display_df.columns = ["Rank", "Player", "Pos", "Team", "Bye", "Proj Pts", "VBD Value", "ADP"]
+if sort_by in ("Biggest Increase", "Biggest Decrease") and len(view) == 0:
+    st.info(
+        "No tracked point changes yet -- this compares against the previous live refresh, "
+        "so it needs at least one refresh with actual data changes to show anything here."
+    )
+
+# Position-tailored stat columns -- a QB's relevant detail (passing) is
+# totally different from a RB/WR/TE's (rushing/receiving), so show the
+# stats that actually matter for whichever position is selected. When
+# viewing ALL positions together, fall back to a compact universal set.
+base_cols = ["Rank", "name", "pos", "team", "bye"]
+base_labels = ["Rank", "Player", "Pos", "Team", "Bye"]
+
+if pos_filter == "QB":
+    stat_cols = ["pass_yds", "pass_td", "pass_int", "rush_yds", "rush_td", "fum_lost"]
+    stat_labels = ["Pass Yds", "Pass TD", "INT", "Rush Yds", "Rush TD", "Fum Lost"]
+elif pos_filter == "RB":
+    stat_cols = ["rush_yds", "rush_td", "rec", "rec_yds", "rec_td", "fum_lost"]
+    stat_labels = ["Rush Yds", "Rush TD", "Rec", "Rec Yds", "Rec TD", "Fum Lost"]
+elif pos_filter in ("WR", "TE"):
+    stat_cols = ["rec", "rec_yds", "rec_td", "rush_yds", "rush_td", "fum_lost"]
+    stat_labels = ["Rec", "Rec Yds", "Rec TD", "Rush Yds", "Rush TD", "Fum Lost"]
+else:
+    # ALL positions mixed together -- a compact set that's meaningful across
+    # every position rather than a huge sparse table.
+    stat_cols = ["pass_yds", "rush_yds", "rec_yds", "rush_td", "rec_td"]
+    stat_labels = ["Pass Yds", "Rush Yds", "Rec Yds", "Rush TD", "Rec TD"]
+
+end_cols = ["fpts", "vbd_value", "adp_rank"]
+end_labels = ["Proj Pts", "VBD Value", "ADP"]
+if sort_by in ("Biggest Increase", "Biggest Decrease"):
+    end_cols = ["fpts", "_pts_delta", "vbd_value", "adp_rank"]
+    end_labels = ["Proj Pts", "Pts Δ", "VBD Value", "ADP"]
+
+display_df = view[base_cols + stat_cols + end_cols].copy()
+
+# Annotate any changed stat with a ▲/▼ and the delta amount, comparing
+# against the previous live refresh -- "we show our work" applied to the
+# projections themselves, not just draft reasoning.
+def format_stat_cell(player_name, col, value):
+    delta = stat_deltas.get(player_name, {}).get(col)
+    val_str = f"{value:.0f}"
+    if delta is None or abs(delta) < 0.5:
+        return val_str
+    arrow = "▲" if delta > 0 else "▼"
+    return f"{val_str} {arrow}{abs(delta):.0f}"
+
+
+for col in stat_cols:
+    display_df[col] = [
+        format_stat_cell(name, col, val) for name, val in zip(view["name"], view[col])
+    ]
+
+display_df.columns = base_labels + stat_labels + end_labels
 display_df["Bye"] = display_df["Bye"].apply(lambda b: f"Week {int(b)}" if pd.notna(b) else "N/A")
 display_df["ADP"] = display_df["ADP"].apply(lambda a: int(a) if pd.notna(a) else "—")
 
+number_col_config = {"Proj Pts": st.column_config.NumberColumn(format="%.1f"),
+                      "VBD Value": st.column_config.NumberColumn(format="%.1f")}
+if "Pts Δ" in display_df.columns:
+    number_col_config["Pts Δ"] = st.column_config.NumberColumn(format="%+.1f")
+
 st.dataframe(
     display_df, use_container_width=True, hide_index=True, height=800,
-    column_config={
-        "Proj Pts": st.column_config.NumberColumn(format="%.1f"),
-        "VBD Value": st.column_config.NumberColumn(format="%.1f"),
-    },
+    column_config=number_col_config,
 )
-st.caption(f"Showing {len(display_df)} players.")
+if any(stat_deltas.values()):
+    st.caption("▲/▼ shows the change in that stat since the last live refresh.")
+if pos_filter == "ALL":
+    st.caption(f"Showing {len(display_df)} players. Filter to a specific position above for its full stat breakdown (e.g. completions/INTs for QB, receptions for WR/TE).")
+else:
+    st.caption(f"Showing {len(display_df)} players.")
