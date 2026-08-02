@@ -160,6 +160,42 @@ def fetch_live_projections(api_key, season=2026, scoring="PPR"):
     return df, datetime.now()
 
 
+@st.cache_data(ttl=12 * 3600, show_spinner="Fetching consensus rankings from FantasyPros...")
+def fetch_consensus_rankings(api_key, season=2026, scoring="PPR"):
+    """
+    Fetches rank_std (how much experts disagree on where a player goes) per
+    position -- used as the uncertainty input for "Next Pick %". We use OUR
+    OWN already-computed overall rank (same one used for the ADP-comparison
+    feature, which correctly accounts for positional scarcity) as the mean
+    of the survival distribution, rather than FantasyPros' rank_ecr --
+    querying rank_ecr per-position returns a POSITIONAL rank (QB1, QB2...)
+    which isn't comparable to an absolute pick number, and there is no
+    "overall" position value this API accepts (confirmed via a live 400
+    error listing valid positions: QB/RB/WR/TE/K/OP/FLX/DST/...). rank_std
+    itself, though, is a relative disagreement measure that's still useful
+    regardless of which ranking anchors it. Subject to the same free-tier
+    truncation (~10/position) as other endpoints.
+    """
+    headers = {"x-api-key": api_key}
+    rows = []
+    for pos in ["QB", "RB", "WR", "TE"]:
+        resp = requests.get(
+            f"{FANTASYPROS_BASE}/nfl/{season}/consensus-rankings",
+            headers=headers, params={"position": pos, "scoring": scoring},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        for p in data.get("players", []):
+            std = p.get("rank_std")
+            try:
+                std = float(std)
+            except (TypeError, ValueError):
+                std = None
+            rows.append({"name": p.get("player_name", ""), "rank_std": std})
+    return pd.DataFrame(rows)
+
+
 def normalize_player_name(name):
     """Lowercase, strip ALL punctuation (periods, apostrophes, hyphens), and
     strip common suffixes -- so names match across sources that format them
@@ -211,28 +247,52 @@ def load_static_raw():
     return raw_df
 
 
+def merge_live_with_static(live_df, static_df):
+    """
+    FantasyPros' free tier truncates responses to a small number of players
+    per position -- so using live data ALONE loses most of the list. Instead,
+    use live stats for whichever players it does cover (freshest data), and
+    keep the full static file for everyone else, so the list stays complete
+    (~500 players) while still benefiting from live updates where available.
+    """
+    merged = static_df.copy()
+    live_indexed = live_df.set_index("name")
+    overlap_cols = [c for c in
+                    ["team", "bye", "pass_yds", "pass_td", "pass_int", "pass_2pt",
+                     "rush_yds", "rush_td", "rush_2pt", "rec", "rec_yds", "rec_td",
+                     "rec_2pt", "fum_lost", "ret_td"]
+                    if c in live_indexed.columns]
+    for col in overlap_cols:
+        live_values = merged["name"].map(live_indexed[col])
+        merged[col] = live_values.combine_first(merged[col])
+
+    # Any live players not already in the static file at all (e.g. a rookie
+    # added after the static file was built) -- include them too.
+    new_players = live_df[~live_df["name"].isin(merged["name"])]
+    if len(new_players) > 0:
+        merged = pd.concat([merged, new_players], ignore_index=True)
+    return merged
+
+
 def load_raw():
     """
     Tries live FantasyPros data first (if a key is available and requests
-    is installed); falls back to the static local CSV on any failure, with
-    a clear on-screen warning rather than a silent/confusing break.
+    is installed), merged with the static file to fill in what the free
+    tier's truncated response doesn't cover; falls back to fully static on
+    any failure, with a clear on-screen warning rather than a silent break.
     """
+    static_df = load_static_raw()
     api_key = get_fantasypros_key()
     if api_key and HAVE_REQUESTS:
         try:
             live_df, fetched_at = fetch_live_projections(api_key)
             st.session_state["data_source"] = "live"
             st.session_state["data_fetched_at"] = fetched_at
-            try:
-                adp_df = pd.read_csv(ADP_FILE)[["name", "adp_rank"]]
-                live_df = live_df.merge(adp_df, on="name", how="left")
-            except FileNotFoundError:
-                live_df["adp_rank"] = None
-            return live_df
+            return merge_live_with_static(live_df, static_df)
         except Exception as e:
             st.warning(f"Live projections fetch failed ({e}) -- using local static data instead.")
     st.session_state["data_source"] = "static"
-    return load_static_raw()
+    return static_df
 
 
 def get_data_last_updated():
@@ -388,6 +448,23 @@ if HAVE_REQUESTS:
 else:
     board["injury_status"] = None
 
+# Attach rank_std (expert disagreement, for the "Next Pick %" survival
+# model) when a FantasyPros key is available. Same free-tier truncation as
+# projections -- only the top ~10/position get real data; everyone else
+# shows "--" rather than a fabricated probability.
+_fp_key_for_rankings = get_fantasypros_key()
+if _fp_key_for_rankings and HAVE_REQUESTS:
+    try:
+        _rankings_df = fetch_consensus_rankings(_fp_key_for_rankings)
+        _rankings_df["_norm_name"] = _rankings_df["name"].apply(normalize_player_name)
+        _rankings_lookup = _rankings_df.set_index("_norm_name")["rank_std"].to_dict()
+        board["_norm_name"] = board["name"].apply(normalize_player_name)
+        board["rank_std"] = board["_norm_name"].map(_rankings_lookup)
+    except Exception:
+        board["rank_std"] = None
+else:
+    board["rank_std"] = None
+
 
 def get_team_on_clock(pick_number, team_names, snake):
     n = len(team_names)
@@ -396,6 +473,47 @@ def get_team_on_clock(pick_number, team_names, snake):
     if snake and round_num % 2 == 1:
         idx_in_round = n - 1 - idx_in_round
     return team_names[idx_in_round], round_num + 1
+
+
+def get_next_turn_pick(team_name, current_pick, team_names, snake):
+    """Returns the pick number at which `team_name` next picks, starting
+    from (and including) current_pick -- i.e. if it's already their turn,
+    returns current_pick itself. In a snake draft, the gap between a team's
+    consecutive turns can be as large as 2n-1 (e.g. picks first in round 1,
+    last in round 2), so the search window must cover a full two rounds,
+    not just one -- an earlier version of this used too small a window and
+    silently returned the wrong (fallback) pick number as a result."""
+    n = len(team_names)
+    p = current_pick
+    for _ in range(2 * n + 1):
+        on_clock, _ = get_team_on_clock(p, team_names, snake)
+        if on_clock == team_name:
+            return p
+        p += 1
+    return current_pick  # fallback, shouldn't normally hit
+
+
+def survival_probability(expected_pick, rank_std, threshold_pick):
+    """
+    Models a player's actual draft position as Normal(expected_pick, rank_std)
+    and returns P(actual position >= threshold_pick) -- the probability
+    they're still available at that pick. expected_pick should be OUR OWN
+    computed overall expected pick (accounts for positional scarcity
+    correctly), not a raw per-position rank -- see fetch_consensus_rankings
+    docstring for why that distinction matters. rank_std (from FantasyPros,
+    still per-position but used here as a relative disagreement measure)
+    captures how much experts disagree: a tightly-agreed-on player is
+    predictable even at the same expected pick as a widely-disputed one.
+    Returns None when we don't have real ranking data for this player,
+    rather than fabricating a number.
+    """
+    if expected_pick is None or rank_std is None or pd.isna(expected_pick) or pd.isna(rank_std):
+        return None
+    if rank_std <= 0:
+        rank_std = 1.0  # guard against a reported zero/degenerate std
+    z = (threshold_pick - expected_pick) / rank_std
+    prob_gone_by_then = 0.5 * (1 + math.erf(z / math.sqrt(2)))
+    return round(max(0.0, min(1.0, 1 - prob_gone_by_then)) * 100, 0)
 
 
 def mark_drafted(name, team_name):
@@ -845,6 +963,7 @@ if st.sidebar.button("Reset entire draft"):
 
 
 # ============ MAIN PANEL ============
+st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.image("assets/banner_cropped.png", use_container_width=True)
 st.markdown(
     "<div style='color:#2FB35E; font-size:16px; font-weight:600; margin-top:-8px; margin-bottom:2px;'>"
@@ -883,6 +1002,19 @@ with st.expander(f"📋 {st.session_state.my_team}'s Roster So Far", expanded=Tr
         st.caption(f"Projected starters: {my_starters_pts:.1f} pts  •  Bench: {bench_count} players")
     else:
         st.caption("No picks yet.")
+
+st.markdown(
+    """
+    <div style="margin: 4px 0 16px 0; font-size: 14px;">
+        <b>Jump to:</b>
+        &nbsp;<a href="#power-rankings" style="text-decoration:none;">🏆 Power Rankings</a>
+        &nbsp;·&nbsp;<a href="#my-roster" style="text-decoration:none;">📋 My Roster</a>
+        &nbsp;·&nbsp;<a href="#draft-log" style="text-decoration:none;">📜 Draft Log</a>
+        &nbsp;·&nbsp;<a href="#draft-grades" style="text-decoration:none;">🎓 Draft Grades</a>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 col1, col2, col3 = st.columns([1, 2, 2])
 with col1:
@@ -1044,12 +1176,17 @@ recommended_all = available_all.sort_values("adjusted_value", ascending=False).r
 
 rank_lookup = {name: i + 1 for i, name in enumerate(recommended_all["name"])}
 current_round = math.ceil(st.session_state.pick_number / st.session_state.num_teams)
+next_turn_pick_for_view = get_next_turn_pick(
+    view_team, st.session_state.pick_number + 1, st.session_state.team_names, st.session_state.snake
+)
 final_reasons = []
+next_pcts = []
 for i, row in enumerate(available_all.itertuples()):
     base_reason = reasons[i]
     our_rank = rank_lookup.get(row.name)
     adp_rank = row.adp_rank
     note = ""
+    next_pct_val = None
     if our_rank is not None:
         # our_rank is a rank among REMAINING players, not an absolute pick
         # number -- project it forward from the current pick, since
@@ -1057,6 +1194,15 @@ for i, row in enumerate(available_all.itertuples()):
         # him starting from right now.
         expected_overall_pick = st.session_state.pick_number + our_rank - 1
         our_round = math.ceil(expected_overall_pick / st.session_state.num_teams)
+
+        # Next Pick %: uses this SAME expected_overall_pick as the mean of
+        # the survival distribution (our own rank, which correctly accounts
+        # for positional scarcity) rather than FantasyPros' rank_ecr -- see
+        # fetch_consensus_rankings docstring for why a raw positional rank
+        # isn't comparable to an absolute pick number.
+        next_pct_val = survival_probability(
+            expected_overall_pick, getattr(row, "rank_std", None), next_turn_pick_for_view
+        )
 
         # Urgency: compare to the CURRENT round, not to ADP. This answers
         # "should I wait on him" -- if our own model expects him gone at or
@@ -1087,8 +1233,10 @@ for i, row in enumerate(available_all.itertuples()):
             else:
                 note += f" For reference, his typical ADP is pick {adp_rank_int} — right about now."
     final_reasons.append(base_reason + note)
+    next_pcts.append(next_pct_val)
 
 available_all["reason"] = final_reasons
+available_all["next_pct"] = next_pcts
 
 # Top-3 sets and the TRUE top pick are always computed off the full pool --
 # never off whatever a position filter or search happens to narrow the view
@@ -1155,6 +1303,45 @@ if HAVE_ANTHROPIC:
 
 st.subheader(f"Draft Board — Recommended for {view_team}")
 
+next_turn_pick_for_view = get_next_turn_pick(
+    view_team, st.session_state.pick_number + 1, st.session_state.team_names, st.session_state.snake
+)
+
+
+def header_with_tooltip(label, tooltip):
+    tooltip_escaped = tooltip.replace('"', "&quot;")
+    return (
+        f'<span title="{tooltip_escaped}" style="font-weight:700; border-bottom:1px dotted #888; '
+        f'cursor:help;">{label}</span>'
+    )
+
+
+# Column header row -- labels each column once, above the list, with a
+# hover tooltip on each explaining what it means (same pattern as Draft
+# Dominator's column tooltips) instead of a standalone note everyone has
+# to read once and then ignore.
+h1, h2, h3, h4, h5, h6 = st.columns([2.3, 1, 1, 1.7, 2, 2.2])
+h1.markdown(header_with_tooltip("Player", "The player's name."), unsafe_allow_html=True)
+h2.markdown(header_with_tooltip("Pos", "Position: QB, RB, WR, or TE."), unsafe_allow_html=True)
+h3.markdown(
+    header_with_tooltip(
+        "Next %",
+        f"If you pass on this player now, the estimated chance he's still available the next "
+        f"time {view_team} picks (pick {next_turn_pick_for_view})."
+    ),
+    unsafe_allow_html=True,
+)
+h4.markdown(
+    header_with_tooltip(
+        "VBD → Adj",
+        "VBD = raw value over replacement. Adj = that value adjusted for this team's specific "
+        "needs, bye weeks, and positional scarcity."
+    ),
+    unsafe_allow_html=True,
+)
+h5.markdown(header_with_tooltip("Why", "Plain-language explanation of the recommendation."), unsafe_allow_html=True)
+h6.markdown(header_with_tooltip("Action", "Draft this player to the selected team."), unsafe_allow_html=True)
+
 recommended_list = list(recommended.head(30).iterrows())
 for i, (_, row) in enumerate(recommended_list):
     is_yellow = row["name"] in top3_vbd_names
@@ -1177,7 +1364,10 @@ for i, (_, row) in enumerate(recommended_list):
         bg = ""
         label = ""
 
-    c1, c2, c3, c4, c5 = st.columns([2.5, 1, 1.8, 2, 2.2])
+    next_pct = row.get("next_pct")
+    next_pct_display = f"{int(next_pct)}%" if next_pct is not None and pd.notna(next_pct) else "—"
+
+    c1, c2, c3, c4, c5, c6 = st.columns([2.3, 1, 1, 1.7, 2, 2.2])
     with c1:
         weight = "font-size:1.1em;" if is_top_pick else ""
         st.markdown(
@@ -1185,9 +1375,11 @@ for i, (_, row) in enumerate(recommended_list):
             unsafe_allow_html=True,
         )
     c2.write(row["pos"])
-    c3.write(f"VBD {row['vbd_value']:.1f} → **Adj {row['adjusted_value']:.1f}**")
-    c4.caption(row["reason"])
-    with c5:
+    with c3:
+        st.write(next_pct_display)
+    c4.write(f"VBD {row['vbd_value']:.1f} → **Adj {row['adjusted_value']:.1f}**")
+    c5.caption(row["reason"])
+    with c6:
         draft_button(row, "board")
 
     if is_top_pick and HAVE_ANTHROPIC:
@@ -1199,6 +1391,7 @@ for i, (_, row) in enumerate(recommended_list):
             st.info(st.session_state.get("ai_explanation_top", ""))
 
 st.markdown("---")
+st.markdown('<div id="power-rankings"></div>', unsafe_allow_html=True)
 st.subheader("🏆 Team Power Rankings (live)")
 st.caption(
     "Starters = projected points from each team's best possible starting lineup "
@@ -1227,6 +1420,8 @@ st.dataframe(
 )
 
 st.markdown("---")
+st.markdown('<a href="#top" style="font-size:13px;">⬆ Back to top</a>', unsafe_allow_html=True)
+st.markdown('<div id="my-roster"></div>', unsafe_allow_html=True)
 st.subheader(f"{st.session_state.my_team}'s Roster")
 
 starters_pts, total_pts, starters_detail = compute_team_projection(st.session_state.my_team)
@@ -1263,6 +1458,8 @@ if full_roster:
 else:
     st.write("_None yet_")
 
+st.markdown('<a href="#top" style="font-size:13px;">⬆ Back to top</a>', unsafe_allow_html=True)
+st.markdown('<div id="draft-log"></div>', unsafe_allow_html=True)
 st.subheader("Full Draft Log")
 if st.session_state.draft_log:
     log_df = pd.DataFrame(st.session_state.draft_log)[["pick_number", "name", "team"]]
@@ -1435,6 +1632,8 @@ def witty_lines_for_team(summary, best_template, worst_template):
 
 
 st.markdown("---")
+st.markdown('<a href="#top" style="font-size:13px;">⬆ Back to top</a>', unsafe_allow_html=True)
+st.markdown('<div id="draft-grades"></div>', unsafe_allow_html=True)
 st.subheader("🎓 Draft Grades")
 st.caption(
     "Surplus value = actual VBD delivered minus the VBD expected at that pick, based on "
@@ -1496,6 +1695,8 @@ else:
         f"_Draft in progress ({total_picks_completed}/{total_picks_needed} picks made) -- "
         "grades available once complete, or check the preview box above."
     )
+
+st.markdown('<a href="#top" style="font-size:13px;">⬆ Back to top</a>', unsafe_allow_html=True)
 
 st.markdown(
     """
