@@ -1260,7 +1260,7 @@ recommended = available.sort_values("adjusted_value", ascending=False)
 
 
 def draft_button(row, key_prefix):
-    if st.button(f"Draft to {assign_team}", key=f"{key_prefix}_btn_{row['name']}"):
+    if st.button("Draft", key=f"{key_prefix}_btn_{row['name']}", help=f"Draft to {assign_team}"):
         mark_drafted(row["name"], assign_team)
         st.rerun()
 
@@ -1320,7 +1320,7 @@ def header_with_tooltip(label, tooltip):
 # hover tooltip on each explaining what it means (same pattern as Draft
 # Dominator's column tooltips) instead of a standalone note everyone has
 # to read once and then ignore.
-h1, h2, h3, h4, h5, h6 = st.columns([2.3, 1, 1, 1.7, 2, 2.2])
+h1, h2, h3, h4, h5, h6 = st.columns([2.0, 0.6, 0.8, 1.4, 4.5, 1.2])
 h1.markdown(header_with_tooltip("Player", "The player's name."), unsafe_allow_html=True)
 h2.markdown(header_with_tooltip("Pos", "Position: QB, RB, WR, or TE."), unsafe_allow_html=True)
 h3.markdown(
@@ -1367,7 +1367,7 @@ for i, (_, row) in enumerate(recommended_list):
     next_pct = row.get("next_pct")
     next_pct_display = f"{int(next_pct)}%" if next_pct is not None and pd.notna(next_pct) else "—"
 
-    c1, c2, c3, c4, c5, c6 = st.columns([2.3, 1, 1, 1.7, 2, 2.2])
+    c1, c2, c3, c4, c5, c6 = st.columns([2.0, 0.6, 0.8, 1.4, 4.5, 1.2])
     with c1:
         weight = "font-size:1.1em;" if is_top_pick else ""
         st.markdown(
