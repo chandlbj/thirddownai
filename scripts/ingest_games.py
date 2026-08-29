@@ -10,6 +10,9 @@ Notes from the Aug 29 2026 spec:
   also lets one run refresh scores for already-played weeks.
 - Runs weekly (or after game days) via GitHub Actions. Upserts by CFBD's
   own game id, so re-running is always safe.
+- Filtered to classification=fbs (Aug 29 2026 decision) — without it,
+  CFBD's /games endpoint returns every division (FCS, D2, etc.), which
+  isn't useful for the FBS-level predictions this feeds.
 """
 import argparse
 import datetime
@@ -19,8 +22,11 @@ from cfbd_client import get as cfbd_get
 from supabase_client import upsert
 
 
-def fetch_games(year: int, season_type: str) -> list:
-    return cfbd_get("/games", {"year": year, "seasonType": season_type})
+def fetch_games(year: int, season_type: str, classification: str = "fbs") -> list:
+    return cfbd_get(
+        "/games",
+        {"year": year, "seasonType": season_type, "classification": classification},
+    )
 
 
 def to_row(g: dict) -> dict:
@@ -50,12 +56,17 @@ def main():
         default=["regular", "postseason"],
         help="CFBD seasonType values to sync",
     )
+    parser.add_argument(
+        "--classification",
+        default="fbs",
+        help="CFBD classification filter (fbs/fcs/ii/iii). Defaults to fbs.",
+    )
     args = parser.parse_args()
 
     total = 0
     for season_type in args.season_types:
-        print(f"Fetching {args.year} {season_type} games from CFBD...")
-        games = fetch_games(args.year, season_type)
+        print(f"Fetching {args.year} {season_type} {args.classification} games from CFBD...")
+        games = fetch_games(args.year, season_type, args.classification)
         print(f"  got {len(games)} games")
         rows = [to_row(g) for g in games if g.get("id") is not None]
         sent = upsert("cfb_games", rows, on_conflict="id")
