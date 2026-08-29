@@ -20,26 +20,52 @@ def _headers(prefer: str) -> dict:
     }
 
 
-def upsert(table: str, rows: list, on_conflict: str, batch_size: int = 500, retries: int = 3) -> int:
-    """Upsert rows into a Supabase table via PostgREST. Returns count of rows sent."""
+def upsert(table: str, rows: list, on_conflict: str, batch_size: int = 200, retries: int = 4, timeout: int = 120) -> int:
+    """Upsert rows into a Supabase table via PostgREST. Returns count of rows sent.
+
+    Retries on both bad HTTP status codes AND network-level exceptions
+    (timeouts, connection resets) — a request that never got a response
+    still needs the same retry/backoff treatment as a 5xx.
+    """
     if not rows:
         return 0
     url = f"{SUPABASE_URL}/rest/v1/{table}?on_conflict={on_conflict}"
     headers = _headers("resolution=merge-duplicates,return=minimal")
     sent = 0
-    for i in range(0, len(rows), batch_size):
+    total_batches = (len(rows) + batch_size - 1) // batch_size
+    for batch_num, i in enumerate(range(0, len(rows), batch_size), 1):
         batch = rows[i : i + batch_size]
         for attempt in range(1, retries + 1):
-            resp = requests.post(url, json=batch, headers=headers, timeout=60)
+            try:
+                resp = requests.post(url, json=batch, headers=headers, timeout=timeout)
+            except requests.exceptions.RequestException as exc:
+                if attempt == retries:
+                    print(
+                        f"ERROR upserting into {table} (batch {batch_num}/{total_batches}): "
+                        f"network error after {retries} attempts: {exc}",
+                        file=sys.stderr,
+                    )
+                    raise
+                wait = 2 ** attempt
+                print(
+                    f"Retrying {table} batch {batch_num}/{total_batches} after network error "
+                    f"({attempt}/{retries}): {exc} — sleeping {wait}s",
+                    file=sys.stderr,
+                )
+                time.sleep(wait)
+                continue
+
             if resp.status_code in (200, 201, 204):
                 sent += len(batch)
+                if batch_num % 10 == 0 or batch_num == total_batches:
+                    print(f"  {table}: upserted batch {batch_num}/{total_batches} ({sent} rows so far)")
                 break
             if attempt == retries:
                 print(f"ERROR upserting into {table}: {resp.status_code} {resp.text[:1000]}", file=sys.stderr)
                 resp.raise_for_status()
             else:
                 wait = 2 ** attempt
-                print(f"Retrying {table} batch after error {resp.status_code} (attempt {attempt}/{retries}), sleeping {wait}s", file=sys.stderr)
+                print(f"Retrying {table} batch {batch_num}/{total_batches} after error {resp.status_code} (attempt {attempt}/{retries}), sleeping {wait}s", file=sys.stderr)
                 time.sleep(wait)
     return sent
 
