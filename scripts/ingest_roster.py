@@ -80,6 +80,20 @@ def main():
         print(f"  per-team fallback got {len(players)} total players")
 
     rows = [r for r in (to_row(p, year) for p in players) if r is not None]
+
+    # CFBD's bulk roster dump can list the same player twice for one season
+    # (e.g. an in-season transfer shows up under both teams). Our primary
+    # key is (id, season), and PostgREST's upsert fails outright if a single
+    # batch contains the same conflict key twice ("ON CONFLICT DO UPDATE
+    # command cannot affect row a second time"), so dedupe here — keep the
+    # last occurrence, which CFBD tends to list as the player's current team.
+    deduped = {}
+    for r in rows:
+        deduped[(r["id"], r["season"])] = r
+    if len(deduped) != len(rows):
+        print(f"  deduped {len(rows) - len(deduped)} duplicate (id, season) rows (transfers etc.)")
+    rows = list(deduped.values())
+
     sent = upsert("cfb_roster", rows, on_conflict="id,season")
     print(f"Done. Upserted {sent} rows into cfb_roster for season {year}.")
     if sent == 0:
