@@ -1,0 +1,30 @@
+name: CFB Roster Sync
+
+on:
+  schedule:
+    # Monthly, 1st of the month at 12:00 UTC — roster composition barely
+    # moves game-to-game, so this is just a light auto-refresh. Trigger
+    # manually (workflow_dispatch) any time a transfer/depth-chart change
+    # needs to land sooner.
+    - cron: "0 12 1 * *"
+  workflow_dispatch: {}
+
+jobs:
+  sync-roster:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Sync cfb_roster
+        env:
+          CFBD_API_KEY: ${{ secrets.CFBD_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python scripts/ingest_roster.py --year ${{ vars.CFB_SEASON_YEAR || '2026' }}
