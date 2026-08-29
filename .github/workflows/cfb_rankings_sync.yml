@@ -1,0 +1,30 @@
+name: CFB Rankings Sync
+
+on:
+  schedule:
+    # Weekly, Tuesdays at 13:00 UTC — AP Top 25 typically releases Sunday
+    # night/Monday, so Tuesday gives it time to post. Also covers Playoff
+    # Committee rankings and the Coaches Poll, which CFBD returns in the
+    # same response.
+    - cron: "0 13 * * 2"
+  workflow_dispatch: {}
+
+jobs:
+  sync-rankings:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Sync cfb_rankings
+        env:
+          CFBD_API_KEY: ${{ secrets.CFBD_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python scripts/ingest_rankings.py --year ${{ vars.CFB_SEASON_YEAR || '2026' }}
