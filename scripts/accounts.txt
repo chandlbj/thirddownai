@@ -1,0 +1,13 @@
+# X accounts to monitor for injury/beat-writer news, one handle per line
+# (no leading @, blank lines and lines starting with # are ignored).
+#
+# Starter list per the Aug 23 2026 news pipeline spec: a small national
+# NFL-insider list to start (open decision #1 in that spec — expand to
+# per-team beat writers whenever you're ready). Edit freely; the script
+# rereads this file on every run.
+AdamSchefter
+RapSheet
+TomPelissero
+JosinaAnderson
+FieldYates
+JordanSchultz
